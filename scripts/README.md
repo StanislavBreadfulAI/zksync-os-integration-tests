@@ -9,16 +9,11 @@ Before running the upgrade script, ensure you have the following installed:
 - **Rust**: `rustup` with the toolchain specified in `rust-toolchain.toml`
 - **Foundry**: `forge`, `cast`, and `anvil` from [Foundry](https://book.getfoundry.sh/getting-started/installation)
 - **Foundry-ZKsync**: [foundry-zksync](https://github.com/matter-labs/foundry-zksync)
-- **zkstackup**: Install from zksync-era repository (used to build zkstack)
 - **Node.js**: Version 22 or later
 - **Yarn**: `npm install -g yarn`
 - **cargo-nextest**: `cargo install cargo-nextest` (optional, for running tests)
 
-To install zkstackup:
-```bash
-cd zksync-era
-cargo install --path zkstack_cli/crates/zkstackup --force
-```
+**Note:** zkstackup will be installed automatically by the setup script.
 
 ## Setup
 

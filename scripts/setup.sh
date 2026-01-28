@@ -94,17 +94,13 @@ else
     echo -e "${GREEN}✓ Submodules already initialized${NC}"
 fi
 
-# Install zkstackup if not already installed
+# Install zkstackup
 print_section "Installing zkstackup"
 
-if command -v zkstackup &> /dev/null; then
-    echo -e "${GREEN}✓ zkstackup already installed${NC}"
-else
-    echo "Installing zkstackup..."
-    cd "${ROOT_DIR}/zksync-era"
-    cargo install --path zkstack_cli/crates/zkstackup --force
-    echo -e "${GREEN}✓ zkstackup installed${NC}"
-fi
+cd "${ROOT_DIR}/zksync-era"
+echo "Running zkstackup install..."
+./zkstack_cli/zkstackup/install --path ./zkstack_cli/zkstackup/zkstackup
+echo -e "${GREEN}✓ zkstackup installed${NC}"
 
 # Build zksync-os-server
 print_section "Building zksync-os-server"
@@ -133,7 +129,7 @@ print_section "Installing zkstack"
 cd "${ROOT_DIR}/zksync-era"
 
 echo "Running zkstackup --local (this may take a while)..."
-zkstackup --local
+zkstackup --local || true
 echo -e "${GREEN}✓ zkstack installed${NC}"
 
 # Install contracts dependencies

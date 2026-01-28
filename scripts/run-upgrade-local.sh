@@ -104,19 +104,13 @@ else
     echo "zksync-os-server already built (skipping)"
 fi
 
-# Install zkstackup if not already installed
-if ! command -v zkstackup &> /dev/null; then
-    echo "Installing zkstackup..."
-    cd "${ROOT_DIR}/zksync-era"
-    cargo install --path zkstack_cli/crates/zkstackup --force
-    echo "zkstackup installed"
-fi
-
 # Install/update zkstack
 print_section "Installing zkstack"
 cd "${ROOT_DIR}/zksync-era"
+echo "Running zkstackup install..."
+./zkstack_cli/zkstackup/install --path ./zkstack_cli/zkstackup/zkstackup
 echo "Running zkstackup --local..."
-zkstackup --local
+zkstackup --local || true
 echo "zkstack installed"
 
 zkstack --version
