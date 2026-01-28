@@ -150,7 +150,13 @@ else
     printf "${GREEN}Server is responding${NC}\n"
 fi
 
-# Setup zkstack chain configuration
+# Stop v30.2 server before upgrade
+print_section "Stopping v30.2 server before upgrade"
+kill -9 $(cat /tmp/zksync_os_server.pid) || true
+rm /tmp/zksync_os_server.pid
+sleep 2
+
+# Setup zkstack chain configuration in zksync-era
 print_section "Setting up zkstack chain configuration"
 cd "${ROOT_DIR}/zksync-era"
 
@@ -158,11 +164,11 @@ cd "${ROOT_DIR}/zksync-era"
 mkdir -p chains/era/configs
 
 # Copy configs from zksync-os-server v30.2
-cp "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default/config.yaml" chains/era/ZkStack.yaml
-cp "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default/wallets.yaml" chains/era/configs/wallets.yaml
-cp "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default/contracts.yaml" chains/era/configs/contracts.yaml
+cp ../zksync-os-server/local-chains/v30.2/default/config.yaml chains/era/ZkStack.yaml
+cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
+cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
 
-# Create a minimal general.yaml for zkstack
+# Create general.yaml
 cat > chains/era/configs/general.yaml <<EOF
 api:
   web3_json_rpc:
@@ -178,15 +184,8 @@ EOF
 
 echo "zkstack configuration created in ${ROOT_DIR}/zksync-era/chains/era"
 
-# Stop v30.2 server before upgrade
-print_section "Stopping v30.2 server before upgrade"
-kill -9 $(cat /tmp/zksync_os_server.pid) || true
-rm /tmp/zksync_os_server.pid
-sleep 2
-
 # Compile v31 contracts
 print_section "Compiling v31 contracts"
-cd "${ROOT_DIR}/zksync-era"
 zkstack dev contracts
 
 # Update permanent values for upgrade

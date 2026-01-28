@@ -111,6 +111,11 @@ jobs:
 
           echo "ZKsync OS Server started on v30.2"
 
+      - name: Stop v30.2 server before upgrade
+        run: |
+          kill -9 $(cat /tmp/zksync_os_server.pid) || true
+          sleep 2
+
       - name: Setup zkstack chain configuration
         run: |
           cd zksync-era
@@ -123,7 +128,7 @@ jobs:
           cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
           cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
 
-          # Create a minimal general.yaml for zkstack
+          # Create general.yaml
           cat > chains/era/configs/general.yaml <<EOF
           api:
             web3_json_rpc:
@@ -136,11 +141,6 @@ jobs:
             http_port: 3124
           l2_chain_id: 6565
           EOF
-
-      - name: Stop v30.2 server before upgrade
-        run: |
-          kill -9 $(cat /tmp/zksync_os_server.pid) || true
-          sleep 2
 
       - name: Compile v31 contracts
         run: |
