@@ -76,6 +76,8 @@ jobs:
         run: |
           cd zksync-era
           ./zkstack_cli/zkstackup/install --path ./zkstack_cli/zkstackup/zkstackup
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/bin:$PATH"
           zkstackup --local || true
           zkstack --version
           cd ..
