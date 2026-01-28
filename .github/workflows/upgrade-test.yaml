@@ -72,20 +72,13 @@ jobs:
       - name: Install Yarn
         run: npm install -g yarn
 
-      - name: Install zkstackup
+      - name: Install zkstack
         run: |
           cd zksync-era
-          cargo install --path zkstack_cli/crates/zkstackup --force
+          ./zkstack_cli/zkstackup/install --path ./zkstack_cli/zkstackup/zkstackup
+          zkstackup --local || true
+          zkstack --version
           cd ..
-
-      - name: Install zkstack (local build)
-        run: |
-          cd zksync-era
-          zkstackup --local
-          cd ..
-
-      - name: Verify zkstack installation
-        run: zkstack --version
 
       - name: Start Anvil L1 chain with v30.2 state
         run: |
