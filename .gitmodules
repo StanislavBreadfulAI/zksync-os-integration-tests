@@ -7,3 +7,8 @@
 	path = era-contracts
 	url = https://github.com/matter-labs/era-contracts
 	branch = main
+
+[submodule "zksync-era"]
+	path = zksync-era
+	url = https://github.com/matter-labs/zksync-era
+	branch = kl/v31-upgrade-2-support
