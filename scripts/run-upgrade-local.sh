@@ -170,6 +170,9 @@ l1:
   l1_rpc_url: http://localhost:8545
 EOF
 
+# Create ecosystem contracts.yaml from v30.2
+cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml configs/contracts.yaml
+
 # Copy config files from zksync-os-server v30.2
 cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
 cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
@@ -268,7 +271,7 @@ zkstack dev run-ecosystem-upgrade \
     --ecosystem-upgrade-stage ecosystem-admin
 
 print_section "Running ecosystem upgrade - Stage 0 (governance)"
-zkstack dev run-ecosystem-upgrade \
+yes | zkstack dev run-ecosystem-upgrade \
     --upgrade-version ${UPGRADE_VERSION} \
     --ecosystem-upgrade-stage governance-stage0
 
