@@ -1,0 +1,9 @@
+[submodule "zksync-os-server"]
+	path = zksync-os-server
+	url = https://github.com/matter-labs/zksync-os-server
+	branch = integration-tests-preparation
+
+[submodule "era-contracts"]
+	path = era-contracts
+	url = https://github.com/matter-labs/era-contracts
+	branch = main
