@@ -160,8 +160,15 @@ sleep 2
 print_section "Setting up zkstack chain configuration"
 cd "${ROOT_DIR}/zksync-era"
 
-# Create chains directory and configs subdirectory
+# Create necessary directories
 mkdir -p chains/era/configs
+mkdir -p configs
+
+# Create ecosystem secrets.yaml
+cat > configs/secrets.yaml <<EOF
+l1:
+  l1_rpc_url: http://localhost:8545
+EOF
 
 # Copy config files from zksync-os-server v30.2
 cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
@@ -200,7 +207,7 @@ base_token:
 wallet_creation: Localhost
 evm_emulator: false
 tight_ports: false
-vm_option: Legacy
+vm_option: ZKSyncOsVM
 EOF
 
 echo "zkstack configuration created in ${ROOT_DIR}/zksync-era/chains/era"
@@ -274,7 +281,7 @@ zkstack dev run-ecosystem-upgrade \
 print_section "Generating upgrade YAML output"
 cd "${ROOT_DIR}/zksync-era/contracts/l1-contracts"
 UPGRADE_ECOSYSTEM_OUTPUT=script-out/v31-upgrade-ecosystem.toml \
-UPGRADE_ECOSYSTEM_OUTPUT_TRANSACTIONS=broadcast/EcosystemUpgrade_v31.s.sol/9/run-latest.json \
+UPGRADE_ECOSYSTEM_OUTPUT_TRANSACTIONS=broadcast/EcosystemUpgrade_v31.s.sol/31337/run-latest.json \
 YAML_OUTPUT_FILE=script-out/v31-local-output.yaml \
 yarn upgrade-yaml-output-generator
 
