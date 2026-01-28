@@ -160,11 +160,10 @@ sleep 2
 print_section "Setting up zkstack chain configuration"
 cd "${ROOT_DIR}/zksync-era"
 
-# Create chains directory and copy v30.2 configs
+# Create chains directory and configs subdirectory
 mkdir -p chains/era/configs
 
-# Copy configs from zksync-os-server v30.2
-cp ../zksync-os-server/local-chains/v30.2/default/config.yaml chains/era/ZkStack.yaml
+# Copy config files from zksync-os-server v30.2
 cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
 cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
 
@@ -180,6 +179,28 @@ api:
 data_handler:
   http_port: 3124
 l2_chain_id: 6565
+EOF
+
+# Create proper ZkStack.yaml with ChainConfigInternal structure
+cat > chains/era/ZkStack.yaml <<EOF
+id: 1
+name: era
+chain_id: 6565
+prover_version: NoProofs
+l1_network: Localhost
+link_to_code: ../..
+configs: ./configs
+rocks_db_path: ../../zksync-os-server/db
+l1_batch_commit_data_generator_mode: Rollup
+base_token:
+  address: "0x0000000000000000000000000000000000000001"
+  nominator: 1
+  denominator: 1
+  kind: Native
+wallet_creation: Localhost
+evm_emulator: false
+tight_ports: false
+vm_option: Legacy
 EOF
 
 echo "zkstack configuration created in ${ROOT_DIR}/zksync-era/chains/era"
