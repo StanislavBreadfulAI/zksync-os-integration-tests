@@ -97,18 +97,12 @@ jobs:
       - name: Start zksync-os-server on v30.2 chain
         run: |
           cd zksync-os-server
-
-          # Clean up any existing database
           rm -rf db/*
-
-          # Start zksync-os-server with v30.2 configuration
           ./target/release/zksync-os-server \
             --config ./local-chains/v30.2/default/config.yaml \
             &> ../zksync-os-server-v30.log &
           echo $! > /tmp/zksync_os_server.pid
-
           sleep 10
-
           echo "ZKsync OS Server started on v30.2"
 
       - name: Stop v30.2 server before upgrade
@@ -116,200 +110,23 @@ jobs:
           kill -9 $(cat /tmp/zksync_os_server.pid) || true
           sleep 2
 
-      - name: Setup zkstack chain configuration
+      - name: Run upgrade test
         run: |
-          cd zksync-era
-
-          # Create necessary directories
-          mkdir -p chains/era/configs
-          mkdir -p configs
-
-          # Create ecosystem secrets.yaml
-          cat > configs/secrets.yaml <<EOF
-          l1:
-            l1_rpc_url: http://localhost:8545
-          EOF
-
-          # Create ecosystem contracts.yaml from v30.2
-          cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml configs/contracts.yaml
-
-          # Copy config files from zksync-os-server v30.2
-          cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
-          cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
-
-          # Create general.yaml
-          cat > chains/era/configs/general.yaml <<EOF
-          api:
-            web3_json_rpc:
-              http_port: 3050
-            prometheus:
-              listener_port: 3312
-            merkle_tree:
-              port: 3053
-          data_handler:
-            http_port: 3124
-          l2_chain_id: 6565
-          EOF
-
-          # Create proper ZkStack.yaml with ChainConfigInternal structure
-          cat > chains/era/ZkStack.yaml <<EOF
-          id: 1
-          name: era
-          chain_id: 6565
-          prover_version: NoProofs
-          l1_network: Localhost
-          link_to_code: ../..
-          configs: ./configs
-          rocks_db_path: ../../zksync-os-server/db
-          l1_batch_commit_data_generator_mode: Rollup
-          base_token:
-            address: "0x0000000000000000000000000000000000000001"
-            nominator: 1
-            denominator: 1
-            kind: Native
-          wallet_creation: Localhost
-          evm_emulator: false
-          tight_ports: false
-          vm_option: ZKSyncOsVM
-          EOF
-
-      - name: Compile v31 contracts
-        run: |
-          cd zksync-era
-          zkstack dev contracts
-
-      - name: Update permanent values for upgrade
-        run: |
-          cd zksync-era
-
-          # Get values from v30.2 config
-          BRIDGEHUB_ADDR=$(awk '/bridgehub_proxy_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-          ERA_CHAIN_ID=$(awk '/l2_chain_id:/ {print $2; exit}' chains/era/configs/general.yaml)
-          CTM_ADDR=$(awk '/state_transition_proxy_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-          BYTECODES_SUPPLIER=$(awk '/l1_bytecodes_supplier_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-          CREATE2_FACTORY=$(awk '/create2_factory_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-          CREATE2_SALT=$(awk '/create2_factory_salt:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-
-          # Create permanent-values.toml
-          mkdir -p contracts/l1-contracts/upgrade-envs/permanent-values
-
-          cat > contracts/l1-contracts/script-config/permanent-values.toml <<EOF
-          era_chain_id = $ERA_CHAIN_ID
-
-          [core_contracts]
-          bridgehub_proxy_addr = "$BRIDGEHUB_ADDR"
-
-          [ctm_contracts]
-          ctm_proxy_addr = "$CTM_ADDR"
-          l1_bytecodes_supplier_addr = "$BYTECODES_SUPPLIER"
-
-          [permanent_contracts]
-          create2_factory_addr = "$CREATE2_FACTORY"
-          create2_factory_salt = "$CREATE2_SALT"
-          EOF
-
-          cp contracts/l1-contracts/script-config/permanent-values.toml \
-             contracts/l1-contracts/upgrade-envs/permanent-values/local.toml
-
-      - name: Run ecosystem upgrade - Stage 0 (no-governance-prepare)
-        run: |
-          cd zksync-era
-          zkstack dev run-ecosystem-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --ecosystem-upgrade-stage no-governance-prepare
-
-      - name: Run ecosystem upgrade - ecosystem-admin
-        run: |
-          cd zksync-era
-          zkstack dev run-ecosystem-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --ecosystem-upgrade-stage ecosystem-admin
-
-      - name: Run ecosystem upgrade - Stage 0 (governance)
-        run: |
-          cd zksync-era
-          zkstack dev run-ecosystem-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --ecosystem-upgrade-stage governance-stage0
-
-      - name: Run ecosystem upgrade - Stage 1
-        run: |
-          cd zksync-era
-          zkstack dev run-ecosystem-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --ecosystem-upgrade-stage governance-stage1
-
-      - name: Generate upgrade YAML output
-        run: |
-          cd zksync-era/contracts/l1-contracts
-          UPGRADE_ECOSYSTEM_OUTPUT=script-out/v31-upgrade-ecosystem.toml \
-          UPGRADE_ECOSYSTEM_OUTPUT_TRANSACTIONS=broadcast/EcosystemUpgrade_v31.s.sol/31337/run-latest.json \
-          YAML_OUTPUT_FILE=script-out/v31-local-output.yaml \
-          yarn upgrade-yaml-output-generator
-
-      - name: Run chain upgrade
-        run: |
-          cd zksync-era
-          zkstack dev run-chain-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --force-display-finalization-params=true \
-            --dangerous-local-default-overrides=true \
-            --chain era
-
-      - name: Run ecosystem upgrade - Stage 2
-        run: |
-          cd zksync-era
-          zkstack dev run-ecosystem-upgrade \
-            --upgrade-version ${{ env.UPGRADE_VERSION }} \
-            --ecosystem-upgrade-stage governance-stage2
-
-      - name: Run ecosystem upgrade - Stage 3 (migrate token balances)
-        run: |
-          cd zksync-era/contracts/l1-contracts
-          forge script deploy-scripts/upgrade/v31/EcosystemUpgrade_v31.s.sol:EcosystemUpgrade_v31 \
-            --sig "stage3()" \
-            --rpc-url http://localhost:8545 \
-            --broadcast \
-            --private-key 0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110 \
-            --legacy \
-            --slow \
-            --gas-price 50000000000
+          cargo test --test upgrade-tests test_v30_to_v31_upgrade -- --ignored --nocapture
 
       - name: Restart zksync-os-server after upgrade
         run: |
           cd zksync-os-server
-
-          # Clean database to force fresh start with upgraded state
-          rm -rf db/*
-
-          # Restart server - it will detect upgraded protocol from L1
           ./target/release/zksync-os-server \
             --config ./local-chains/v30.2/default/config.yaml \
             &> ../zksync-os-server-final.log &
           echo $! > /tmp/zksync_os_server_final.pid
           sleep 10
-
           echo "ZKsync OS Server restarted after upgrade"
 
-      - name: Fund test wallets
+      - name: Verify upgrade with test transaction
         run: |
-          # Use the rich account from v30.2 config
-          RICH_ACCOUNT=0x36615Cf349d7F6344891B1e7CA7C72883F5dc049
-          PRIVATE_KEY=0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110
-
-          # Send test transaction to verify server is working
-          cast send 0x5A67EE02274D9Ec050d412b96fE810Be4D71e7A0 \
-            --value 100 \
-            --private-key ${PRIVATE_KEY} \
-            --rpc-url http://localhost:3050
-
-          echo "Test transaction sent successfully"
-
-      - name: Run integration tests
-        run: |
-          cd zksync-os-server
-          cargo nextest run --profile ci -p zksync_os_integration_tests || true
-          echo "Integration tests completed"
+          cargo test --test upgrade-tests test_post_upgrade_verification -- --ignored --nocapture
 
       - name: Upload logs on failure
         if: failure()

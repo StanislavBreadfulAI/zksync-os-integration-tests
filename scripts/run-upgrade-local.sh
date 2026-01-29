@@ -21,14 +21,12 @@ mkdir -p "${LOGS_DIR}"
 # Cleanup function
 cleanup() {
     printf "${YELLOW}Cleaning up processes...${NC}\n"
-    if [ -f /tmp/zksync_os_server.pid ]; then
-        kill -9 $(cat /tmp/zksync_os_server.pid) 2>/dev/null || true
-        rm /tmp/zksync_os_server.pid
-    fi
-    if [ -f /tmp/zksync_os_server_final.pid ]; then
-        kill -9 $(cat /tmp/zksync_os_server_final.pid) 2>/dev/null || true
-        rm /tmp/zksync_os_server_final.pid
-    fi
+    # Stop and remove Docker containers
+    docker stop zksync-os-server-v30 2>/dev/null || true
+    docker rm zksync-os-server-v30 2>/dev/null || true
+    docker stop zksync-os-server-final 2>/dev/null || true
+    docker rm zksync-os-server-final 2>/dev/null || true
+    # Stop Anvil
     if [ -f /tmp/anvil.pid ]; then
         kill -9 $(cat /tmp/anvil.pid) 2>/dev/null || true
         rm /tmp/anvil.pid
@@ -94,15 +92,10 @@ fi
 
 printf "${GREEN}✓ Submodules check passed${NC}\n"
 
-# Build zksync-os-server if not already built
-print_section "Building zksync-os-server"
-if [ ! -f "${ROOT_DIR}/zksync-os-server/target/release/zksync-os-server" ]; then
-    echo "Building zksync-os-server..."
-    cd "${ROOT_DIR}/zksync-os-server"
-    cargo build --release
-else
-    echo "zksync-os-server already built (skipping)"
-fi
+# Pull zksync-os-server Docker image
+print_section "Pulling zksync-os-server Docker image"
+docker pull ghcr.io/matter-labs/zksync-os-server:latest
+echo "Docker image pulled successfully"
 
 # Install/update zkstack
 print_section "Installing zkstack"
@@ -133,12 +126,19 @@ cd "${ROOT_DIR}/zksync-os-server"
 rm -rf db/*
 echo "Database cleaned"
 
-# Start zksync-os-server with v30.2 configuration
-./target/release/zksync-os-server \
-    --config ./local-chains/v30.2/default/config.yaml \
-    &> "${LOGS_DIR}/zksync-os-server-v30.log" &
-echo $! > /tmp/zksync_os_server.pid
-echo "ZKsync OS Server started (PID: $(cat /tmp/zksync_os_server.pid))"
+# Start zksync-os-server with v30.2 configuration using Docker
+docker run -d \
+    --name zksync-os-server-v30 \
+    -v "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default:/config:ro" \
+    -v "${ROOT_DIR}/zksync-os-server/db:/db" \
+    -p 3050:3050 \
+    -p 3312:3312 \
+    --network host \
+    ghcr.io/matter-labs/zksync-os-server:latest \
+    --config /config/config.yaml \
+    &> "${LOGS_DIR}/zksync-os-server-v30.log"
+
+echo "ZKsync OS Server started (container: zksync-os-server-v30)"
 echo "Logs: ${LOGS_DIR}/zksync-os-server-v30.log"
 
 sleep 10
@@ -152,183 +152,32 @@ fi
 
 # Stop v30.2 server before upgrade
 print_section "Stopping v30.2 server before upgrade"
-kill -9 $(cat /tmp/zksync_os_server.pid) || true
-rm /tmp/zksync_os_server.pid
+docker stop zksync-os-server-v30 || true
+docker rm zksync-os-server-v30 || true
 sleep 2
 
-# Setup zkstack chain configuration in zksync-era
-print_section "Setting up zkstack chain configuration"
-cd "${ROOT_DIR}/zksync-era"
-
-# Create necessary directories
-mkdir -p chains/era/configs
-mkdir -p configs
-
-# Create ecosystem secrets.yaml
-cat > configs/secrets.yaml <<EOF
-l1:
-  l1_rpc_url: http://localhost:8545
-EOF
-
-# Create ecosystem contracts.yaml from v30.2
-cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml configs/contracts.yaml
-
-# Copy config files from zksync-os-server v30.2
-cp ../zksync-os-server/local-chains/v30.2/default/wallets.yaml chains/era/configs/wallets.yaml
-cp ../zksync-os-server/local-chains/v30.2/default/contracts.yaml chains/era/configs/contracts.yaml
-
-# Create general.yaml
-cat > chains/era/configs/general.yaml <<EOF
-api:
-  web3_json_rpc:
-    http_port: 3050
-  prometheus:
-    listener_port: 3312
-  merkle_tree:
-    port: 3053
-data_handler:
-  http_port: 3124
-l2_chain_id: 6565
-EOF
-
-# Create proper ZkStack.yaml with ChainConfigInternal structure
-cat > chains/era/ZkStack.yaml <<EOF
-id: 1
-name: era
-chain_id: 6565
-prover_version: NoProofs
-l1_network: Localhost
-link_to_code: ../..
-configs: ./configs
-rocks_db_path: ../../zksync-os-server/db
-l1_batch_commit_data_generator_mode: Rollup
-base_token:
-  address: "0x0000000000000000000000000000000000000001"
-  nominator: 1
-  denominator: 1
-  kind: Native
-wallet_creation: Localhost
-evm_emulator: false
-tight_ports: false
-vm_option: ZKSyncOsVM
-EOF
-
-echo "zkstack configuration created in ${ROOT_DIR}/zksync-era/chains/era"
-
-# Compile v31 contracts
-print_section "Compiling v31 contracts"
-zkstack dev contracts
-
-# Update permanent values for upgrade
-print_section "Updating permanent values for upgrade"
-cd "${ROOT_DIR}/zksync-era"
-
-# Get values from v30.2 config
-BRIDGEHUB_ADDR=$(awk '/bridgehub_proxy_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-ERA_CHAIN_ID=$(awk '/l2_chain_id:/ {print $2; exit}' chains/era/configs/general.yaml)
-CTM_ADDR=$(awk '/state_transition_proxy_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-BYTECODES_SUPPLIER=$(awk '/l1_bytecodes_supplier_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-CREATE2_FACTORY=$(awk '/create2_factory_addr:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-CREATE2_SALT=$(awk '/create2_factory_salt:/ {print $2; exit}' chains/era/configs/contracts.yaml)
-
-echo "Chain ID: ${ERA_CHAIN_ID}"
-echo "Bridgehub: ${BRIDGEHUB_ADDR}"
-echo "CTM: ${CTM_ADDR}"
-
-# Create permanent-values.toml
-mkdir -p contracts/l1-contracts/upgrade-envs/permanent-values
-
-cat > contracts/l1-contracts/script-config/permanent-values.toml <<EOF
-era_chain_id = ${ERA_CHAIN_ID}
-
-[core_contracts]
-bridgehub_proxy_addr = "${BRIDGEHUB_ADDR}"
-
-[ctm_contracts]
-ctm_proxy_addr = "${CTM_ADDR}"
-l1_bytecodes_supplier_addr = "${BYTECODES_SUPPLIER}"
-
-[permanent_contracts]
-create2_factory_addr = "${CREATE2_FACTORY}"
-create2_factory_salt = "${CREATE2_SALT}"
-EOF
-
-cp contracts/l1-contracts/script-config/permanent-values.toml \
-   contracts/l1-contracts/upgrade-envs/permanent-values/local.toml
-
-echo "Permanent values updated"
-
-# Run ecosystem upgrade stages
-print_section "Running ecosystem upgrade - Stage 0 (no-governance-prepare)"
-cd "${ROOT_DIR}/zksync-era"
-zkstack dev run-ecosystem-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --ecosystem-upgrade-stage no-governance-prepare
-
-print_section "Running ecosystem upgrade - ecosystem-admin"
-zkstack dev run-ecosystem-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --ecosystem-upgrade-stage ecosystem-admin
-
-print_section "Running ecosystem upgrade - Stage 0 (governance)"
-yes | zkstack dev run-ecosystem-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --ecosystem-upgrade-stage governance-stage0
-
-print_section "Running ecosystem upgrade - Stage 1"
-zkstack dev run-ecosystem-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --ecosystem-upgrade-stage governance-stage1
-
-# Generate upgrade YAML output
-print_section "Generating upgrade YAML output"
-cd "${ROOT_DIR}/zksync-era/contracts/l1-contracts"
-UPGRADE_ECOSYSTEM_OUTPUT=script-out/v31-upgrade-ecosystem.toml \
-UPGRADE_ECOSYSTEM_OUTPUT_TRANSACTIONS=broadcast/EcosystemUpgrade_v31.s.sol/31337/run-latest.json \
-YAML_OUTPUT_FILE=script-out/v31-local-output.yaml \
-yarn upgrade-yaml-output-generator
-
-# Run chain upgrade
-print_section "Running chain upgrade"
-cd "${ROOT_DIR}/zksync-era"
-zkstack dev run-chain-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --force-display-finalization-params=true \
-    --dangerous-local-default-overrides=true \
-    --chain era
-
-# Run ecosystem upgrade Stage 2
-print_section "Running ecosystem upgrade - Stage 2"
-zkstack dev run-ecosystem-upgrade \
-    --upgrade-version ${UPGRADE_VERSION} \
-    --ecosystem-upgrade-stage governance-stage2
-
-# Run ecosystem upgrade Stage 3 (migrate token balances)
-print_section "Running ecosystem upgrade - Stage 3 (migrate token balances)"
-cd "${ROOT_DIR}/zksync-era/contracts/l1-contracts"
-forge script deploy-scripts/upgrade/v31/EcosystemUpgrade_v31.s.sol:EcosystemUpgrade_v31 \
-    --sig "stage3()" \
-    --rpc-url http://localhost:8545 \
-    --broadcast \
-    --private-key 0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110 \
-    --legacy \
-    --slow \
-    --gas-price 50000000000
+# Run the upgrade test (this does all the upgrade steps)
+print_section "Running upgrade test"
+cd "${ROOT_DIR}"
+cargo test --test upgrade-tests test_v30_to_v31_upgrade -- --ignored --nocapture
 
 # Restart zksync-os-server after upgrade
 print_section "Restarting zksync-os-server after upgrade"
 cd "${ROOT_DIR}/zksync-os-server"
 
-# Clean database to force fresh start with upgraded state
-rm -rf db/*
-echo "Database cleaned"
+# Restart server - it will detect upgraded protocol from L1 using Docker
+docker run -d \
+    --name zksync-os-server-final \
+    -v "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default:/config:ro" \
+    -v "${ROOT_DIR}/zksync-os-server/db:/db" \
+    -p 3050:3050 \
+    -p 3312:3312 \
+    --network host \
+    ghcr.io/matter-labs/zksync-os-server:latest \
+    --config /config/config.yaml \
+    &> "${LOGS_DIR}/zksync-os-server-final.log"
 
-# Restart server - it will detect upgraded protocol from L1
-./target/release/zksync-os-server \
-    --config ./local-chains/v30.2/default/config.yaml \
-    &> "${LOGS_DIR}/zksync-os-server-final.log" &
-echo $! > /tmp/zksync_os_server_final.pid
-echo "ZKsync OS Server restarted (PID: $(cat /tmp/zksync_os_server_final.pid))"
+echo "ZKsync OS Server restarted (container: zksync-os-server-final)"
 echo "Logs: ${LOGS_DIR}/zksync-os-server-final.log"
 
 sleep 10
@@ -340,20 +189,10 @@ else
     printf "${GREEN}Server is responding after upgrade${NC}\n"
 fi
 
-# Test with a transaction
-print_section "Testing with a transaction"
-RICH_ACCOUNT=0x36615Cf349d7F6344891B1e7CA7C72883F5dc049
-PRIVATE_KEY=0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110
-
-echo "Sending test transaction..."
-if cast send 0x5A67EE02274D9Ec050d412b96fE810Be4D71e7A0 \
-    --value 100 \
-    --private-key ${PRIVATE_KEY} \
-    --rpc-url http://localhost:3050; then
-    printf "${GREEN}Test transaction sent successfully!${NC}\n"
-else
-    printf "${RED}Test transaction failed${NC}\n"
-fi
+# Verify upgrade with test transaction
+print_section "Verifying upgrade"
+cd "${ROOT_DIR}"
+cargo test --test upgrade-tests test_post_upgrade_verification -- --ignored --nocapture
 
 # Summary
 print_section "Upgrade Complete!"
@@ -370,9 +209,10 @@ echo "  - zksync-os-server-v30.log"
 echo "  - zksync-os-server-final.log"
 echo ""
 echo "To stop all services, press Ctrl+C or run:"
-echo "  kill \$(cat /tmp/zksync_os_server_final.pid /tmp/anvil.pid 2>/dev/null)"
+echo "  docker stop zksync-os-server-final && docker rm zksync-os-server-final"
+echo "  kill \$(cat /tmp/anvil.pid 2>/dev/null)"
 echo ""
-printf "${YELLOW}Note: Services will continue running. Use cleanup() or Ctrl+C to stop.${NC}\n"
+printf "${YELLOW}Note: Services will continue running. Use Ctrl+C to stop.${NC}\n"
 
 # Keep the script running so services stay up
 echo ""

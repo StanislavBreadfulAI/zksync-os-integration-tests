@@ -6,14 +6,14 @@ This directory contains scripts for testing ZKsync OS protocol upgrades locally.
 
 Before running the upgrade script, ensure you have the following installed:
 
-- **Rust**: `rustup` with the toolchain specified in `rust-toolchain.toml`
+- **Docker**: For running zksync-os-server container
+- **Rust**: `rustup` with the toolchain specified in `rust-toolchain.toml` (for building zkstack)
 - **Foundry**: `forge`, `cast`, and `anvil` from [Foundry](https://book.getfoundry.sh/getting-started/installation)
 - **Foundry-ZKsync**: [foundry-zksync](https://github.com/matter-labs/foundry-zksync)
 - **Node.js**: Version 22 or later
 - **Yarn**: `npm install -g yarn`
-- **cargo-nextest**: `cargo install cargo-nextest` (optional, for running tests)
 
-**Note:** zkstackup will be installed automatically by the setup script.
+**Note:** zkstackup will be installed automatically by the setup script. The zksync-os-server Docker image will be pulled automatically.
 
 ## Setup
 
@@ -28,18 +28,15 @@ Before running the upgrade script, ensure you have the following installed:
    git submodule update --init --recursive
    ```
 
-2. **Build the components** (optional - the script will build if needed):
+2. **Run the setup script** (optional - the upgrade script will setup if needed):
    ```bash
-   # Build zksync-os-server
-   cd zksync-os-server
-   cargo build --release
-   cd ..
-
-   # Build zkstack
-   cd zksync-era
-   cargo build --release --bin zkstack
-   cd ..
+   ./scripts/setup.sh
    ```
+
+   This will:
+   - Pull the zksync-os-server Docker image
+   - Install zkstackup and build zkstack
+   - Install contract dependencies
 
 ## Running the Upgrade
 
@@ -73,10 +70,10 @@ The script will:
 The script follows these steps:
 
 1. **Environment Check**: Verifies all required tools are installed
-2. **Build Phase**: Builds `zksync-os-server` and `zkstack` if not already built
+2. **Setup Phase**: Pulls zksync-os-server Docker image and builds zkstack if needed
 3. **Start v30.2 Chain**:
    - Starts Anvil with pre-configured v30.2 L1 state
-   - Starts zksync-os-server with v30.2 configuration
+   - Starts zksync-os-server Docker container with v30.2 configuration
 4. **Prepare Upgrade**:
    - Sets up zkstack chain configuration from v30.2 state
    - Compiles v31 contracts
@@ -123,24 +120,30 @@ If ports 8545 or 3050 are already in use:
 lsof -i :8545
 lsof -i :3050
 
-# Kill them
+# Kill them (or stop Docker containers)
 kill -9 <PID>
+docker stop zksync-os-server-v30 zksync-os-server-final
 ```
 
-### Build Failures
+### Docker Issues
 
-If the script fails during build:
+If the Docker container fails to start:
 ```bash
-# Clean and rebuild zksync-os-server
-cd zksync-os-server
-cargo clean
-cargo build --release
-cd ..
+# Pull the latest image
+docker pull ghcr.io/matter-labs/zksync-os-server:latest
 
-# Clean and rebuild zkstack
+# Clean up old containers
+docker stop zksync-os-server-v30 zksync-os-server-final || true
+docker rm zksync-os-server-v30 zksync-os-server-final || true
+```
+
+### Build Failures (zkstack)
+
+If zkstack fails to build:
+```bash
+# Rebuild zkstack
 cd zksync-era
-cargo clean
-cargo build --release --bin zkstack
+zkstackup --local
 cd ..
 ```
 
@@ -158,10 +161,18 @@ If the server doesn't respond after startup:
 # Check logs
 tail -f logs/zksync-os-server-final.log
 
+# Or check Docker logs
+docker logs zksync-os-server-final
+
 # Try restarting manually
-cd zksync-os-server
-rm -rf db/*
-./target/release/zksync-os-server --config ./local-chains/v30.2/default/config.yaml
+docker stop zksync-os-server-final && docker rm zksync-os-server-final
+cd zksync-os-server && rm -rf db/*
+docker run -d --name zksync-os-server-final \
+  -v $(pwd)/local-chains/v30.2/default:/config:ro \
+  -v $(pwd)/db:/db \
+  -p 3050:3050 -p 3312:3312 --network host \
+  ghcr.io/matter-labs/zksync-os-server:latest \
+  --config /config/config.yaml
 ```
 
 ## Testing Manually
