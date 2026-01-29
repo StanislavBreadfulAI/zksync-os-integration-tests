@@ -1,20 +1,121 @@
+//! # ZKsync OS Protocol Upgrade Tests
+//!
+//! This test suite performs end-to-end protocol upgrade testing from v30.2 to v31.
+//!
+//! ## Running the Tests
+//!
+//! ### Full Upgrade Test
+//!
+//! The test automatically starts and manages the Anvil L1 node:
+//!
+//! ```bash
+//! cargo test --test upgrade-tests test_v30_to_v31_upgrade -- --ignored --nocapture
+//! ```
+//!
+//! After the test completes, manually restart the server to apply the upgrade:
+//!
+//! ```bash
+//! cd zksync-os-server
+//! ./target/release/zksync-os-server --config ./local-chains/v30.2/default/config.yaml &
+//! ```
+//!
+//! ### Post-Upgrade Verification (after manually restarting the server)
+//!
+//! ```bash
+//! cargo test --test upgrade-tests test_post_upgrade_verification -- --ignored --nocapture
+//! ```
+//!
+//! ## Using the Complete Script
+//!
+//! For a fully automated test including Docker infrastructure:
+//!
+//! ```bash
+//! bash ./scripts/run-upgrade-local.sh
+//! ```
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 const UPGRADE_VERSION: &str = "v31-interop-b";
 const RICH_ACCOUNT_PRIVATE_KEY: &str = "0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110";
+
+/// Manages the Anvil L1 node process lifecycle
+struct AnvilNode {
+    process: Child,
+}
+
+impl AnvilNode {
+    /// Start Anvil with v30.2 L1 state
+    fn start(root: &Path) -> Result<Self> {
+        println!("Starting Anvil L1 chain with v30.2 state...");
+
+        let state_file = root.join("zksync-os-server/local-chains/v30.2/default/zkos-l1-state.json");
+        if !state_file.exists() {
+            anyhow::bail!("L1 state file not found at: {}", state_file.display());
+        }
+
+        let process = Command::new("anvil")
+            .arg("--load-state")
+            .arg(&state_file)
+            .arg("--port")
+            .arg("8545")
+            .arg("--block-time")
+            .arg("1") // Auto-mine blocks every 1 second
+            .arg("--gas-limit")
+            .arg("30000000") // Higher gas limit for complex transactions
+            .stdout(Stdio::null()) // Suppress Anvil output for cleaner test logs
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to start Anvil. Is it installed?")?;
+
+        let node = AnvilNode { process };
+
+        // Wait for Anvil to be ready
+        println!("Waiting for Anvil to be ready...");
+        for attempt in 1..=10 {
+            std::thread::sleep(Duration::from_secs(1));
+            if check_service("http://localhost:8545", "Anvil L1").is_ok() {
+                println!("✓ Anvil L1 is ready");
+                return Ok(node);
+            }
+            if attempt < 10 {
+                println!("  Attempt {}/10: Anvil not ready yet, waiting...", attempt);
+            }
+        }
+
+        anyhow::bail!("Anvil failed to start after 10 seconds")
+    }
+}
+
+impl Drop for AnvilNode {
+    fn drop(&mut self) {
+        println!("Stopping Anvil L1 node...");
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
 
 /// Helper to get project root directory
 fn get_project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Helper to run a command and return its output
+/// Helper to run a command and display its output in real-time
 fn run_command(name: &str, cmd: &mut Command) -> Result<()> {
     println!("Running: {}", name);
+    println!("Command: {:?}", cmd);
+
+    // Inherit stdin, stdout, and stderr so we see all output including Foundry traces
+    // Also set RUST_LOG for more verbose zkstack output
     let status = cmd
+        .env("RUST_LOG", "info")
+        .env("VERBOSE", "1")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
         .status()
         .with_context(|| format!("Failed to run: {}", name))?;
 
@@ -100,7 +201,7 @@ fn compile_contracts(root: &Path) -> Result<()> {
     run_command(
         "Compile v31 contracts",
         Command::new("zkstack")
-            .args(["dev", "contracts"])
+            .args(["dev", "contracts", "--verbose"])
             .current_dir(root.join("zksync-era")),
     )
 }
@@ -190,6 +291,7 @@ fn run_ecosystem_upgrades(root: &Path) -> Result<()> {
                 UPGRADE_VERSION,
                 "--ecosystem-upgrade-stage",
                 "no-governance-prepare",
+                "--verbose",
             ])
             .current_dir(&era_path),
     )?;
@@ -205,6 +307,7 @@ fn run_ecosystem_upgrades(root: &Path) -> Result<()> {
                 UPGRADE_VERSION,
                 "--ecosystem-upgrade-stage",
                 "ecosystem-admin",
+                "--verbose",
             ])
             .current_dir(&era_path),
     )?;
@@ -220,6 +323,7 @@ fn run_ecosystem_upgrades(root: &Path) -> Result<()> {
                 UPGRADE_VERSION,
                 "--ecosystem-upgrade-stage",
                 "governance-stage0",
+                "--verbose",
             ])
             .current_dir(&era_path),
     )?;
@@ -235,6 +339,7 @@ fn run_ecosystem_upgrades(root: &Path) -> Result<()> {
                 UPGRADE_VERSION,
                 "--ecosystem-upgrade-stage",
                 "governance-stage1",
+                "--verbose",
             ])
             .current_dir(&era_path),
     )?;
@@ -274,6 +379,7 @@ fn run_chain_upgrade(root: &Path) -> Result<()> {
                 "--dangerous-local-default-overrides=true",
                 "--chain",
                 "era",
+                "--verbose",
             ])
             .current_dir(root.join("zksync-era")),
     )
@@ -294,11 +400,13 @@ fn run_final_upgrade_stages(root: &Path) -> Result<()> {
                 UPGRADE_VERSION,
                 "--ecosystem-upgrade-stage",
                 "governance-stage2",
+                "--verbose",
             ])
             .current_dir(&era_path),
     )?;
 
     // Stage 3 (migrate token balances)
+    // Run with -vvvv for maximum verbosity to see all transaction traces
     run_command(
         "Ecosystem upgrade - Stage 3 (migrate token balances)",
         Command::new("forge")
@@ -316,9 +424,40 @@ fn run_final_upgrade_stages(root: &Path) -> Result<()> {
                 "--slow",
                 "--gas-price",
                 "50000000000",
+                "-vvvv", // Maximum verbosity for full traces
             ])
             .current_dir(era_path.join("contracts/l1-contracts")),
     )
+}
+
+/// Check if a service is accessible
+fn check_service(url: &str, name: &str) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+
+    match client.post(url).json(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_chainId",
+        "params": [],
+        "id": 1
+    })).send() {
+        Ok(_) => {
+            println!("✓ {} is accessible at {}", name, url);
+            Ok(())
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "{} is not accessible at {}.\n\
+                Error: {}\n\n\
+                Please start {} first:\n\
+                  anvil --load-state zksync-os-server/local-chains/v30.2/default/zkos-l1-state.json --port 8545 &\n\
+                Or run the full setup script:\n\
+                  bash ./scripts/run-upgrade-local.sh",
+                name, url, e, name
+            )
+        }
+    }
 }
 
 /// Test transaction after upgrade
@@ -348,6 +487,9 @@ fn test_v30_to_v31_upgrade() -> Result<()> {
     let root = get_project_root();
 
     println!("=== Starting v30 to v31 upgrade test ===\n");
+
+    // Start Anvil L1 node (will be automatically stopped on test completion)
+    let _anvil = AnvilNode::start(&root)?;
 
     // Setup zkstack configuration
     setup_zkstack_configuration(&root)?;
@@ -390,9 +532,13 @@ fn test_v30_to_v31_upgrade() -> Result<()> {
 fn test_post_upgrade_verification() -> Result<()> {
     println!("=== Running post-upgrade verification ===\n");
 
+    // Check that L2 server is running
+    println!("Checking prerequisites...");
+    check_service("http://localhost:3050", "ZKsync OS Server L2")?;
+
     // Wait a bit for server to be fully ready
-    println!("Waiting for server to be ready...");
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    println!("Waiting for server to be fully ready...");
+    std::thread::sleep(Duration::from_secs(5));
 
     // Test transaction
     test_transaction()?;

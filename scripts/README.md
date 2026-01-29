@@ -42,28 +42,46 @@ Before running the upgrade script, ensure you have the following installed:
 
 ### Quick Start
 
-Simply run the script with bash:
+**Option 1: Run the Rust test directly (recommended for development)**
+
+The test is now fully self-contained and manages the Anvil L1 node automatically:
 
 ```bash
+# Build the zksync-os-server binary first (required by the workflow)
+cd zksync-os-server
+cargo build --release
+cd ..
+
+# Run the upgrade test (automatically starts and manages Anvil)
+cargo test --test upgrade-tests test_v30_to_v31_upgrade -- --ignored --nocapture
+```
+
+**Option 2: Run the full Docker-based script**
+
+```bash
+# Run the full local upgrade with Docker containers
 bash ./scripts/run-upgrade-local.sh
 ```
 
-Or make sure it runs with bash:
+**Note:** The upgrade logic is now implemented as a Rust test in `tests/upgrade-tests.rs`. The test automatically:
+1. Starts Anvil L1 with v30.2 state
+2. Sets up zkstack configuration
+3. Compiles v31 contracts
+4. Updates permanent values
+5. Executes all upgrade stages (v30.2 → v31)
+6. Cleans the database for fresh restart
+7. Stops Anvil automatically when done
+
+After the test completes, manually restart the server and verify:
 
 ```bash
-./scripts/run-upgrade-local.sh
+# Restart server with upgraded protocol
+cd zksync-os-server
+./target/release/zksync-os-server --config ./local-chains/v30.2/default/config.yaml &
+
+# Verify the upgrade
+cargo test --test upgrade-tests test_post_upgrade_verification -- --ignored --nocapture
 ```
-
-**Note:** Do not run with `sh` - the script requires bash features.
-
-The script will:
-1. Check prerequisites and build necessary components
-2. Start Anvil with v30.2 L1 state
-3. Start zksync-os-server on v30.2
-4. Set up zkstack configuration
-5. Execute all upgrade stages (v30.2 → v31)
-6. Restart zksync-os-server with upgraded protocol
-7. Run a test transaction to verify the upgrade
 
 ### What the Script Does
 
@@ -203,6 +221,18 @@ After the upgrade completes, you can run the integration tests:
 cd zksync-os-server
 cargo nextest run --profile ci -p zksync_os_integration_tests
 ```
+
+## Running in CI
+
+The GitHub Actions workflow (`.github/workflows/upgrade-test.yaml`) automates the entire upgrade process:
+
+1. **Framework Setup**: Installs Rust, Foundry, Node.js, zkstack, etc.
+2. **Infrastructure**: Starts Anvil L1 and zksync-os-server on v30.2
+3. **Upgrade Test**: Runs `cargo test --test upgrade-tests test_v30_to_v31_upgrade`
+4. **Server Restart**: Restarts server with upgraded protocol
+5. **Verification**: Runs `cargo test --test upgrade-tests test_post_upgrade_verification`
+
+All upgrade logic is centralized in `tests/upgrade-tests.rs`, eliminating duplication between the workflow and local scripts.
 
 ## Advanced Usage
 

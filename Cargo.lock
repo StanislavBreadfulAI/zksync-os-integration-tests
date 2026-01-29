@@ -13000,6 +13000,8 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "reqwest",
+ "serde_json",
  "test-log",
  "tokio",
  "zksync_os_integration_tests",
