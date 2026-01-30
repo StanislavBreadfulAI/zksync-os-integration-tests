@@ -26,11 +26,7 @@ cleanup() {
     docker rm zksync-os-server-v30 2>/dev/null || true
     docker stop zksync-os-server-final 2>/dev/null || true
     docker rm zksync-os-server-final 2>/dev/null || true
-    # Stop Anvil
-    if [ -f /tmp/anvil.pid ]; then
-        kill -9 $(cat /tmp/anvil.pid) 2>/dev/null || true
-        rm /tmp/anvil.pid
-    fi
+    # Note: Anvil is managed by the Rust test and automatically cleaned up
     printf "${GREEN}Cleanup complete${NC}\n"
 }
 
@@ -108,17 +104,8 @@ echo "zkstack installed"
 
 zkstack --version
 
-# Start Anvil with v30.2 L1 state
-print_section "Starting Anvil L1 chain with v30.2 state"
-anvil --load-state "${ROOT_DIR}/zksync-os-server/local-chains/v30.2/default/zkos-l1-state.json" \
-    --port 8545 \
-    &> "${LOGS_DIR}/anvil.log" &
-echo $! > /tmp/anvil.pid
-echo "Anvil started (PID: $(cat /tmp/anvil.pid))"
-echo "Logs: ${LOGS_DIR}/anvil.log"
-sleep 5
-
 # Clean and start zksync-os-server on v30.2
+# Note: Anvil L1 is now started automatically by the upgrade test
 print_section "Starting zksync-os-server on v30.2"
 cd "${ROOT_DIR}/zksync-os-server"
 
@@ -157,6 +144,7 @@ docker rm zksync-os-server-v30 || true
 sleep 2
 
 # Run the upgrade test (this does all the upgrade steps)
+# Note: The test automatically starts and manages the Anvil L1 node
 print_section "Running upgrade test"
 cd "${ROOT_DIR}"
 cargo test --test upgrade-tests test_v30_to_v31_upgrade -- --ignored --nocapture
@@ -200,7 +188,6 @@ echo ""
 printf "${GREEN}Upgrade process completed successfully!${NC}\n"
 echo ""
 echo "Services running:"
-echo "  - Anvil L1:              http://localhost:8545"
 echo "  - ZKsync OS Server:      http://localhost:3050"
 echo ""
 echo "Logs directory: ${LOGS_DIR}"
@@ -208,9 +195,8 @@ echo "  - anvil.log"
 echo "  - zksync-os-server-v30.log"
 echo "  - zksync-os-server-final.log"
 echo ""
-echo "To stop all services, press Ctrl+C or run:"
+echo "To stop the server:"
 echo "  docker stop zksync-os-server-final && docker rm zksync-os-server-final"
-echo "  kill \$(cat /tmp/anvil.pid 2>/dev/null)"
 echo ""
 printf "${YELLOW}Note: Services will continue running. Use Ctrl+C to stop.${NC}\n"
 
