@@ -46,7 +46,6 @@ jobs:
       - name: Install Rust toolchain
         uses: moonrepo/setup-rust@v1
         with:
-          channel: nightly-2025-05-23
           inherit-toolchain: true
           bins: cargo-nextest
           cache: false
