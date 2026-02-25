@@ -1,0 +1,116 @@
+name: ZKsync OS Upgrade Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade-test:
+    runs-on: matterlabs-ci-runner-high-performance
+    timeout-minutes: 120
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      WORKSPACE: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Clone era-contracts (tjg-getting-rid-of-permanent-values)
+        run: |
+          git clone --depth 1 --branch tjg-getting-rid-of-permanent-values \
+            https://github.com/matter-labs/era-contracts.git ../era-contracts
+
+      - name: Init era-contracts submodules
+        run: |
+          cd ../era-contracts && git submodule update --init --recursive
+
+      - name: Clone zksync-os-server (bytecodes-supplier-support)
+        run: |
+          git clone --depth 1 --branch bytecodes-supplier-support \
+            https://github.com/matter-labs/zksync-os-server.git ../zksync-os-server
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libclang-dev \
+            libssl-dev \
+            pkg-config \
+            jq \
+            wget \
+            curl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-02-20
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Install Foundry
+        run: |
+          mkdir -p foundry
+          curl -LO https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz
+          tar zxf foundry_v1.5.1_linux_amd64.tar.gz -C ./foundry
+          chmod +x ./foundry/*
+          echo "${PWD}/foundry" >> "${GITHUB_PATH}"
+
+      - name: Install Foundry-ZKsync
+        uses: dutterbutter/foundry-zksync-toolchain@v1
+        with:
+          version: v0.1.5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18.20.8"
+
+      - name: Install Yarn
+        run: npm install -g yarn@1.22.19
+
+      - name: Build era-contracts
+        run: |
+          cd ../era-contracts && yarn build-all-contracts
+
+      - name: Run upgrade test
+        run: |
+          # Test builds contracts, builds and starts server via ServerBuilder, runs full upgrade, then stops server
+          cargo test --package integration-tests --test upgrade-tests -- test_v30_to_v31_upgrade --exact --nocapture --ignored
+
+      - name: Prepare artifacts for upload
+        if: failure()
+        run: |
+          mkdir -p _artifacts/era-contracts
+          cp -r ../era-contracts/l1-contracts/broadcast _artifacts/era-contracts/ 2>/dev/null || true
+          cp -r ../era-contracts/l1-contracts/script-out _artifacts/era-contracts/ 2>/dev/null || true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-test-logs
+          path: |
+            integration-tests/logs/
+            _artifacts/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Server and Anvil are managed by the test and cleaned up when the test exits
+          true
