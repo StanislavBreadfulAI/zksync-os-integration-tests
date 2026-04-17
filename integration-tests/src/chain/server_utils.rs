@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::borrow::Cow;
 
@@ -15,9 +15,6 @@ const ANSI_PURPLE: &str = "\x1b[35m";
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_BLUE: &str = "\x1b[34m";
-
-pub const DEFAULT_TEST_PRIVATE_KEY: &str =
-    "0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110";
 
 /// Poll `eth_chainId` via `cast chain-id` until the RPC endpoint is reachable.
 pub fn wait_for_chain_to_be_ready(
@@ -90,9 +87,8 @@ fn rpc_failure_looks_like_server_down(error: &str) -> bool {
 }
 
 fn print_stacktrace_context(log_path: &Path, context_lines_before: usize) -> Result<()> {
-    let raw_logs = fs::read_to_string(log_path).with_context(|| {
-        format!("Failed to read server log file '{}'", log_path.display())
-    })?;
+    let raw_logs = fs::read_to_string(log_path)
+        .with_context(|| format!("Failed to read server log file '{}'", log_path.display()))?;
 
     let sanitized_logs = strip_ansi_escape_sequences(&raw_logs);
     if sanitized_logs != raw_logs {
@@ -180,8 +176,8 @@ pub fn strip_ansi_escape_sequences(input: &str) -> String {
         match it.peek().copied() {
             Some('[') => {
                 it.next(); // consume '['
-                // Consume CSI sequence until a final byte (usually an ASCII letter).
-                while let Some(c) = it.next() {
+                           // Consume CSI sequence until a final byte (usually an ASCII letter).
+                for c in it.by_ref() {
                     if c.is_ascii_alphabetic() {
                         break;
                     }
@@ -189,7 +185,7 @@ pub fn strip_ansi_escape_sequences(input: &str) -> String {
             }
             Some(']') => {
                 it.next(); // consume ']'
-                // Consume OSC sequence until BEL or ST (ESC \)
+                           // Consume OSC sequence until BEL or ST (ESC \)
                 loop {
                     match it.next() {
                         Some('\u{0007}') | None => break,
@@ -212,58 +208,10 @@ pub fn strip_ansi_escape_sequences(input: &str) -> String {
     out
 }
 
-/// Send L2 transactions every 3 seconds and poll L1 until at least `min_batches`
-/// are executed on the chain contract.
-pub fn wait_for_executed_batches_with_traffic(
-    l2_rpc_url: &str,
-    l1_rpc_url: &str,
-    diamond_proxy_addr: &str,
-    sender_private_key: &str,
-    min_batches: u64,
-    timeout: Duration,
-) -> Result<u64> {
-    let start = Instant::now();
-    let mut tx_count = 0u64;
-    let mut next_progress_at = start + Duration::from_secs(5);
-
-    loop {
-        let executed = get_total_batches_executed(l1_rpc_url, diamond_proxy_addr)
-            .context("Failed to read getTotalBatchesExecuted from L1")?;
-
-        let now = Instant::now();
-        if now >= next_progress_at {
-            println!(
-                "Progress: executed_l1_batches={}, sent_txs={}",
-                executed, tx_count
-            );
-            next_progress_at = now + Duration::from_secs(5);
-        }
-
-        if executed >= min_batches {
-            println!(
-                "Reached executed L1 batches target: {} (sent {} txs)",
-                executed, tx_count
-            );
-            return Ok(executed);
-        }
-
-        if start.elapsed() >= timeout {
-            anyhow::bail!(
-                "Timed out waiting for executed L1 batches. target={}, current={}, sent_txs={}",
-                min_batches,
-                executed,
-                tx_count
-            );
-        }
-
-        send_traffic_tx(l2_rpc_url, sender_private_key)
-            .with_context(|| format!("Failed to send traffic tx #{}", tx_count + 1))?;
-        tx_count += 1;
-        sleep(Duration::from_secs(3));
-    }
-}
-
-fn send_traffic_tx(l2_rpc_url: &str, sender_private_key: &str) -> Result<()> {
+/// Send a tiny self-driven L2 transaction (1 wei to `0x...01`) to nudge the
+/// server's batch builder. Internal implementation for
+/// [`crate::server::Server::send_traffic_tx`].
+pub(crate) fn send_traffic_tx(l2_rpc_url: &str, sender_private_key: &str) -> Result<()> {
     let output = Command::new("cast")
         .args([
             "send",
@@ -296,7 +244,7 @@ fn send_traffic_tx(l2_rpc_url: &str, sender_private_key: &str) -> Result<()> {
 
 fn find_latest_server_log_path() -> Result<Option<std::path::PathBuf>> {
     let project_root = find_project_root()?;
-    let logs_root = project_root.join("integration-tests/logs");
+    let logs_root = project_root.join("test-run-logs");
     if !logs_root.exists() {
         return Ok(None);
     }
@@ -344,7 +292,10 @@ fn find_latest_server_log_path() -> Result<Option<std::path::PathBuf>> {
     Ok(best.map(|(_, path)| path))
 }
 
-fn get_total_batches_executed(l1_rpc_url: &str, diamond_proxy_addr: &str) -> Result<u64> {
+pub(crate) fn get_total_batches_executed(
+    l1_rpc_url: &str,
+    diamond_proxy_addr: &str,
+) -> Result<u64> {
     let output = Command::new("cast")
         .args([
             "call",
@@ -376,137 +327,26 @@ fn parse_u64_value(raw: &str) -> Result<u64> {
     raw.parse::<u64>().context("Invalid decimal value")
 }
 
-/// Derive Ethereum address from a private key via `cast wallet address`.
+/// Derive Ethereum address from a private key.
 pub fn address_from_private_key(private_key: &str) -> Result<String> {
-    let output = Command::new("cast")
-        .args(["wallet", "address", "--private-key", private_key])
-        .output()
-        .context("Failed to run cast wallet address")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "cast wallet address failed:\nSTDERR:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    use alloy::signers::local::PrivateKeySigner;
+    let key = private_key.strip_prefix("0x").unwrap_or(private_key);
+    let signer: PrivateKeySigner = key.parse().context("Invalid private key")?;
+    Ok(format!("{:?}", signer.address()))
 }
 
-/// Return L2 native balance in wei via `cast balance`.
-pub fn get_l2_balance(address: &str, l2_rpc_url: &str) -> Result<u128> {
-    let output = Command::new("cast")
-        .args(["balance", address, "--rpc-url", l2_rpc_url])
-        .output()
-        .context("Failed to run cast balance")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "cast balance failed:\nSTDERR:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if let Some(hex) = raw.strip_prefix("0x") {
-        return u128::from_str_radix(hex, 16).context("Invalid hex balance");
-    }
-    raw.parse::<u128>().context("Invalid decimal balance")
-}
-
-fn read_toolchain_from_dir(dir: &Path) -> Option<String> {
-    let toml_path = dir.join("rust-toolchain.toml");
-    if toml_path.exists() {
-        let content = fs::read_to_string(&toml_path).ok()?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("channel") {
-                let rest = line
-                    .strip_prefix("channel")?
-                    .trim()
-                    .trim_start_matches('=')
-                    .trim();
-                let channel = rest.trim_matches('"').trim_matches('\'').trim();
-                if !channel.is_empty() {
-                    return Some(channel.to_string());
-                }
-            }
+pub(crate) fn print_deposit_failure_server_logs(server_logs_path: Option<&Path>) {
+    if let Some(log_path) = server_logs_path {
+        if let Err(err) = print_stacktrace_context(log_path, 100) {
+            eprintln!(
+                "Failed to extract stacktrace context from server logs '{}': {}",
+                log_path.display(),
+                err
+            );
         }
+        return;
     }
-    let legacy_path = dir.join("rust-toolchain");
-    if legacy_path.exists() {
-        let content = fs::read_to_string(&legacy_path).ok()?;
-        return Some(content.trim().to_string());
+    if let Ok(Some(log_path)) = find_latest_server_log_path() {
+        let _ = print_stacktrace_context(&log_path, 100);
     }
-    None
-}
-
-/// Build and run the generate-deposit tool from zksync-os-server to submit an L1->L2 deposit,
-/// then poll L2 until `test_address` has balance > 0. Caller must fund `test_address` on L1 first.
-pub fn fund_l2_via_l1_deposit(
-    server_root: &Path,
-    l1_rpc_url: &str,
-    l2_rpc_url: &str,
-    bridgehub_addr: &str,
-    chain_id: u64,
-    test_private_key: &str,
-    amount_ether: f64,
-    balance_poll_timeout: Duration,
-) -> Result<u128> {
-    let test_address = address_from_private_key(test_private_key)?;
-    // Build generate-deposit (same pattern as server build: use repo toolchain).
-    let mut build_cmd = Command::new("cargo");
-    build_cmd
-        .arg("build")
-        .arg("--release")
-        .arg("-p")
-        .arg("zksync_os_generate_deposit")
-        .current_dir(server_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    if let Some(toolchain) = read_toolchain_from_dir(server_root) {
-        build_cmd.env("RUSTUP_TOOLCHAIN", &toolchain);
-    }
-    let status = build_cmd
-        .status()
-        .context("Failed to run cargo build for generate-deposit")?;
-    if !status.success() {
-        anyhow::bail!("cargo build -p zksync_os_generate_deposit failed in {}", server_root.display());
-    }
-    let bin = server_root.join("target/release/zksync_os_generate_deposit");
-    if !bin.exists() {
-        anyhow::bail!("generate-deposit binary not found at {}", bin.display());
-    }
-    let output = Command::new(&bin)
-        .args([
-            "--bridgehub",
-            bridgehub_addr,
-            "--chain-id",
-            &chain_id.to_string(),
-            "--l1-rpc-url",
-            l1_rpc_url,
-            "--private-key",
-            test_private_key,
-            "--amount",
-            &amount_ether.to_string(),
-        ])
-        .output()
-        .context("Failed to run generate-deposit")?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "generate-deposit failed:\nSTDOUT:\n{}\nSTDERR:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let deadline = Instant::now() + balance_poll_timeout;
-    while Instant::now() < deadline {
-        let balance = get_l2_balance(&test_address, l2_rpc_url)?;
-        if balance > 0 {
-            return Ok(balance);
-        }
-        sleep(Duration::from_secs(2));
-    }
-    anyhow::bail!(
-        "L2 balance for {} did not become > 0 within {:?}",
-        test_address,
-        balance_poll_timeout
-    )
 }

@@ -15,26 +15,29 @@ pub enum DockerError {
     DockerNotAvailable(String),
 }
 
-pub fn docker_image_exists(tag: &str) -> Result<bool, DockerError> {
-    if !docker_available() {
-        return Err(DockerError::DockerNotAvailable(
-            "Docker is not installed or not in PATH".to_string(),
-        ));
-    }
-
-    let status = Command::new("docker")
-        .args(["image", "inspect"])
-        .arg(tag)
-        .stdin(Stdio::null())
+/// Check if a docker image exists locally first, then fall back to a remote
+/// registry manifest check. This avoids slow network round-trips when the
+/// image has already been pulled.
+pub fn docker_image_exists(image: &str) -> bool {
+    // Fast local check
+    let local = Command::new("docker")
+        .args(["image", "inspect", image])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|e| DockerError::CommandFailed(format!(
-            "Failed to execute docker image inspect: {}",
-            e
-        )))?;
-
-    Ok(status.success())
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if local {
+        return true;
+    }
+    // Slower remote check
+    Command::new("docker")
+        .args(["manifest", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub fn docker_build_image(
@@ -68,7 +71,9 @@ pub fn docker_build_image(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker build: {}", e)))?;
+        .map_err(|e| {
+            DockerError::CommandFailed(format!("Failed to execute docker build: {}", e))
+        })?;
 
     if !status.success() {
         return Err(DockerError::CommandFailed(format!(
@@ -87,20 +92,31 @@ pub fn docker_pull_image(image: &str) -> Result<(), DockerError> {
         ));
     }
 
-    let status = Command::new("docker")
+    let output = Command::new("docker")
         .arg("pull")
+        .args(["--platform", "linux/amd64"])
         .arg(image)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker pull: {}", e)))?;
 
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DockerError::CommandFailed(format!(
-            "docker pull failed with status: {}",
-            status
+            "docker pull failed with status: {}\n{}",
+            output.status, stderr
         )));
+    }
+
+    // Print only the "Status:" line (e.g. "Status: Image is up to date for …")
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.starts_with("Status:") {
+            println!("{}", line);
+            break;
+        }
     }
 
     Ok(())
@@ -141,7 +157,9 @@ pub fn docker_create_container(image: &str) -> Result<String, DockerError> {
     let output = Command::new("docker")
         .args(["create", image])
         .output()
-        .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker create: {}", e)))?;
+        .map_err(|e| {
+            DockerError::CommandFailed(format!("Failed to execute docker create: {}", e))
+        })?;
 
     if !output.status.success() {
         return Err(DockerError::CommandFailed(format!(
@@ -153,7 +171,11 @@ pub fn docker_create_container(image: &str) -> Result<String, DockerError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn docker_cp_from_container(container_id: &str, container_src: &str, host_dst: &Path) -> Result<(), DockerError> {
+pub fn docker_cp_from_container(
+    container_id: &str,
+    container_src: &str,
+    host_dst: &Path,
+) -> Result<(), DockerError> {
     if !docker_available() {
         return Err(DockerError::DockerNotAvailable(
             "Docker is not installed or not in PATH".to_string(),
@@ -208,10 +230,7 @@ pub fn docker_rm_container(container_id: &str) -> Result<(), DockerError> {
 
 /// Check if Docker is available
 pub fn docker_available() -> bool {
-    Command::new("docker")
-        .arg("--version")
-        .output()
-        .is_ok()
+    Command::new("docker").arg("--version").output().is_ok()
 }
 
 /// Start a Docker container by name
@@ -226,7 +245,9 @@ pub fn start_container(container_name: &str) -> Result<Output, DockerError> {
         .arg("start")
         .arg(container_name)
         .output()
-        .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker start: {}", e)))?;
+        .map_err(|e| {
+            DockerError::CommandFailed(format!("Failed to execute docker start: {}", e))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -283,10 +304,7 @@ pub fn run_container(
     }
 
     let mut cmd = Command::new("docker");
-    cmd.arg("run")
-        .arg("-d")
-        .arg("--name")
-        .arg(container_name);
+    cmd.arg("run").arg("-d").arg("--name").arg(container_name);
 
     for arg in args {
         cmd.arg(arg);
@@ -294,9 +312,9 @@ pub fn run_container(
 
     cmd.arg(image);
 
-    let output = cmd.output().map_err(|e| {
-        DockerError::CommandFailed(format!("Failed to execute docker run: {}", e))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker run: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -324,9 +342,9 @@ pub fn remove_container(container_name: &str, force: bool) -> Result<Output, Doc
     }
     cmd.arg(container_name);
 
-    let output = cmd.output().map_err(|e| {
-        DockerError::CommandFailed(format!("Failed to execute docker rm: {}", e))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| DockerError::CommandFailed(format!("Failed to execute docker rm: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -371,10 +389,7 @@ pub fn is_container_running(container_name: &str) -> Result<bool, DockerError> {
 }
 
 /// Wait for a container to be running (with timeout)
-pub fn wait_for_container(
-    container_name: &str,
-    timeout: Duration,
-) -> Result<(), DockerError> {
+pub fn wait_for_container(container_name: &str, timeout: Duration) -> Result<(), DockerError> {
     let start = std::time::Instant::now();
     let check_interval = Duration::from_millis(500);
 
@@ -464,41 +479,45 @@ impl DockerContainer {
             .arg("--format")
             .arg("{{.Names}}")
             .output()
-            .map_err(|e| DockerError::CommandFailed(format!(
-                "Failed to check if container exists: {}",
-                e
-            )))?;
-        
+            .map_err(|e| {
+                DockerError::CommandFailed(format!("Failed to check if container exists: {}", e))
+            })?;
+
         let stdout = String::from_utf8_lossy(&check_output.stdout);
         if stdout.trim() != self.name {
             // Container doesn't exist, can't save logs
             return Ok(());
         }
-        
+
         // IMPORTANT: Save logs immediately while container still exists
         // Don't wait before checking - the container must exist NOW
         let output = Command::new("docker")
             .arg("logs")
             .arg(&self.name)
             .output()
-            .map_err(|e| DockerError::CommandFailed(format!(
-                "Failed to execute docker logs for container '{}': {}",
-                self.name,
-                e
-            )))?;
+            .map_err(|e| {
+                DockerError::CommandFailed(format!(
+                    "Failed to execute docker logs for container '{}': {}",
+                    self.name, e
+                ))
+            })?;
         let mut combined = Vec::with_capacity(output.stdout.len() + output.stderr.len());
         combined.extend_from_slice(&output.stdout);
         combined.extend_from_slice(&output.stderr);
-        std::fs::write(logs_path, combined).map_err(|e| DockerError::CommandFailed(format!(
-            "Failed to write docker logs to '{}': {}",
-            logs_path.display(),
-            e
-        )))?;
-        strip_ansi_escape_codes_in_file(logs_path).map_err(|e| DockerError::CommandFailed(format!(
-            "Failed to strip ANSI escapes from '{}': {}",
-            logs_path.display(),
-            e
-        )))?;
+        std::fs::write(logs_path, combined).map_err(|e| {
+            DockerError::CommandFailed(format!(
+                "Failed to write docker logs to '{}': {}",
+                logs_path.display(),
+                e
+            ))
+        })?;
+        strip_ansi_escape_codes_in_file(logs_path).map_err(|e| {
+            DockerError::CommandFailed(format!(
+                "Failed to strip ANSI escapes from '{}': {}",
+                logs_path.display(),
+                e
+            ))
+        })?;
 
         // Wait after saving logs to ensure file is written
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -520,19 +539,19 @@ impl DockerContainer {
             .arg("kill")
             .arg(&self.name)
             .output()
-            .map_err(|e| DockerError::CommandFailed(format!(
-                "Failed to execute docker kill for container '{}': {}",
-                self.name,
-                e
-            )))?;
+            .map_err(|e| {
+                DockerError::CommandFailed(format!(
+                    "Failed to execute docker kill for container '{}': {}",
+                    self.name, e
+                ))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stderr.contains("No such container") && !stderr.contains("is not running") {
                 return Err(DockerError::CommandFailed(format!(
                     "docker kill failed for container '{}': {}",
-                    self.name,
-                    stderr
+                    self.name, stderr
                 )));
             }
         }
