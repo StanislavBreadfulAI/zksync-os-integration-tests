@@ -71,6 +71,7 @@ fn extract_relayed_sl_da_validator(toml_body: &str) -> Result<String> {
     Ok(parsed.relayed_sl_da_validator)
 }
 
+
 /// Load the vote-prep TOML from the preset cache dir (preferred — survives
 /// era-contracts cleanup), falling back to the era-contracts script-out that
 /// `generate-l1-state` wrote during cache creation.
@@ -267,10 +268,10 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             chain_name,
             "--gateway-chain-id",
             &gateway_chain_id_str,
+            "--gateway-rpc-url",
+            gw_l2_rpc.as_str(),
             "--l1-gas-price",
             l1_gas_price.as_str(),
-            "--vote-preparation-toml",
-            vote_prep_path_rel.as_str(),
             "--refund-recipient",
             &deployer_addr,
             "--out",
@@ -308,8 +309,6 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             &deployer_addr,
             "--gateway-rpc-url",
             gw_l2_rpc.as_str(),
-            "--vote-preparation-toml",
-            vote_prep_path_rel.as_str(),
             "--out",
             &phase2_safe_abs,
         ])

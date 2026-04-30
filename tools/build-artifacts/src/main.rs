@@ -66,10 +66,7 @@ fn main() -> Result<()> {
     }
 
     for era in &era_paths {
-        eprintln!(
-            "build-artifacts: building era-contracts in {}",
-            era.display()
-        );
+        eprintln!("build-artifacts: building era-contracts in {}", era.display());
         build_era(era)?;
     }
     for server in &server_paths {
@@ -88,7 +85,8 @@ fn collect_local_paths(
     let mut era = BTreeSet::new();
     let mut server = BTreeSet::new();
 
-    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).context("parse presets.yaml")?;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(yaml).context("parse presets.yaml")?;
     let map = parsed
         .as_mapping()
         .context("presets.yaml root is not a mapping")?;
@@ -136,24 +134,44 @@ fn resolve_local(project_root: &Path, value: &str) -> Option<PathBuf> {
 }
 
 fn build_era(era: &Path) -> Result<()> {
-    if !era.join("package.json").exists() {
-        eprintln!(
-            "build-artifacts: no package.json at {}; skipping yarn build",
-            era.display()
-        );
-    } else {
-        let mut cmd = Command::new("yarn");
-        cmd.arg("build-all-contracts").current_dir(era);
+    // zksync-os runs L2 contracts as EVM, so no zksolc / zkout. Only run
+    // EVM `forge build` in l1-contracts and copy artifacts to zkstack-out
+    // for protocol-ops abigen. If a forge script tries to read `zkout/...`,
+    // fix the script (point it at EVM artifacts) rather than generating
+    // zkout here.
+    let l1 = era.join("l1-contracts");
+    if l1.join("foundry.toml").exists() {
+        let mut cmd = Command::new("forge");
+        cmd.arg("build").current_dir(&l1);
         scrub_outer_cargo_env(&mut cmd);
         pipe_to_tty(&mut cmd);
-        run(&mut cmd).with_context(|| format!("yarn build-all-contracts in {}", era.display()))?;
+        run(&mut cmd).with_context(|| format!("forge build in {}", l1.display()))?;
+
+        let mut cmd = Command::new("yarn");
+        cmd.arg("copy-to-zkstack-out").current_dir(&l1);
+        scrub_outer_cargo_env(&mut cmd);
+        pipe_to_tty(&mut cmd);
+        run(&mut cmd).with_context(|| format!("yarn copy-to-zkstack-out in {}", l1.display()))?;
+
+        // ethers' `abigen!` macro reads JSON via `include_str!` but cargo
+        // does not track those JSON files as inputs, so a regenerated ABI
+        // alone won't trigger a protocol-ops rebuild. Touch abi.rs so
+        // cargo treats the next build as stale and re-runs the macro.
+        let abi_rs = era.join("protocol-ops/src/abi.rs");
+        if abi_rs.exists() {
+            let _ = Command::new("touch").arg(&abi_rs).status();
+        }
+    } else {
+        eprintln!(
+            "build-artifacts: no l1-contracts/foundry.toml at {}; skipping forge build",
+            era.display()
+        );
     }
 
     for sub in [
         "protocol-ops",
         "tools/zksync-os-genesis-gen",
         "tools/wallets-gen",
-        "tools/upgrade-readiness-checker",
     ] {
         let dir = era.join(sub);
         if dir.join("Cargo.toml").exists() {
@@ -234,7 +252,9 @@ fn pipe_to_tty(cmd: &mut Command) {
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
-    let status = cmd.status().with_context(|| format!("spawn {cmd:?}"))?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("spawn {cmd:?}"))?;
     if !status.success() {
         anyhow::bail!("command failed (exit {status}): {cmd:?}");
     }

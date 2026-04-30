@@ -441,10 +441,14 @@ async fn run_ecosystem_upgrades(
         ])
         .context("ecosystem upgrade-prepare failed")?;
 
-    println!("  Applying prepare Safe bundles (deployer) ...");
+    println!("  Applying prepare Safe bundles (deployer + governor) ...");
+    // upgrade-prepare can emit a governance-broadcast bundle for
+    // `ensureCtmsAndProxyAdminsOwnedByGovernance` (no-op on the local
+    // fixture, but signed by governance) in addition to the deployer's
+    // bundles, so both keys must be available to `.apply`.
     contracts_backend
         .parse_safe_bundles(&prepare_dir, l1_rpc_url)?
-        .apply(&[deployer_key])
+        .apply(&[deployer_key, governor_key])
         .context("apply ecosystem-upgrade-prepare Safe bundles")?;
 
     // Read deployed-address metadata from the manifest's `metadata[0].output`
