@@ -1,6 +1,10 @@
 v31_draft_with_main_server:
   era_contracts: kl/anvil-hardening
-  zksync_os_server: main
+  # TODO: revert to `main` once the new `CommitBatchInfoZKsyncOS` /
+  # `precommitSharedBridge` interface lands on the mainline server image.
+  # Until then, mainline encodes the old commit struct and the new
+  # contracts revert on commitBatchesSharedBridge → batches never finalize.
+  zksync_os_server: gateway-live-migration-fixes
   tests:
     - l1_settling_test
     - gateway_settling_test
