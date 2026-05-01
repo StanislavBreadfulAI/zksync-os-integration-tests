@@ -71,7 +71,6 @@ fn extract_relayed_sl_da_validator(toml_body: &str) -> Result<String> {
     Ok(parsed.relayed_sl_da_validator)
 }
 
-
 /// Load the vote-prep TOML from the preset cache dir (preferred — survives
 /// era-contracts cleanup), falling back to the era-contracts script-out that
 /// `generate-l1-state` wrote during cache creation.
