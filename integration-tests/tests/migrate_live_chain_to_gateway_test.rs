@@ -168,7 +168,6 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             &vote_prep_toml,
         )
         .context("stage gateway_vote_prep_out.toml into era-contracts script-out")?;
-    let vote_prep_path_rel = "/script-out/gateway_vote_prep_out.toml".to_string();
 
     let signers: &[&str] = &[&chain_owner_pk, &deployer_pk];
     let l1_gas_price = "1000000000".to_string();
