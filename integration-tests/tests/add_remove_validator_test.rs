@@ -78,8 +78,8 @@ fn has_committer_role(
 fn prepare_and_execute_validator_change(
     contracts_backend: &EraContractsBackend,
     l1_rpc_url: &str,
-    eco_path: &str,
-    chain_name: &str,
+    bridgehub: &str,
+    chain_id_str: &str,
     chain_owner_pk: &str,
     subcommand: &str, // "add-validator" or "remove-validator"
     out_subdir: &str,
@@ -94,10 +94,10 @@ fn prepare_and_execute_validator_change(
             subcommand,
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            eco_path,
-            "--chain",
-            chain_name,
+            "--bridgehub",
+            bridgehub,
+            "--chain-id",
+            chain_id_str,
             "--validator-address",
             TEST_VALIDATOR_ADDRESS,
             "--out",
@@ -207,7 +207,7 @@ async fn run_add_remove_validator_test() -> Result<()> {
     // `test-run-logs/<preset>/add_remove_validator/<subdir>/safe`. A per-invocation
     // UUID keeps concurrent test runs isolated and prevents stale bundles
     // from a prior run leaking into the current `manifest.json`.
-    let eco_path = contracts_backend.ecosystem_yaml_path(&preset)?;
+    let chain_id_str = chain_id.to_string();
     let run_tag = uuid::Uuid::new_v4();
     let add_subdir = format!("add_remove_validator_{run_tag}/validator_add");
     let remove_subdir = format!("add_remove_validator_{run_tag}/validator_remove");
@@ -216,8 +216,8 @@ async fn run_add_remove_validator_test() -> Result<()> {
     prepare_and_execute_validator_change(
         &contracts_backend,
         &l1_rpc_url,
-        &eco_path,
-        chain_name,
+        &eco.bridgehub,
+        &chain_id_str,
         &chain_owner_pk,
         "add-validator",
         &add_subdir,
@@ -241,8 +241,8 @@ async fn run_add_remove_validator_test() -> Result<()> {
     prepare_and_execute_validator_change(
         &contracts_backend,
         &l1_rpc_url,
-        &eco_path,
-        chain_name,
+        &eco.bridgehub,
+        &chain_id_str,
         &chain_owner_pk,
         "remove-validator",
         &remove_subdir,

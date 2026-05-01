@@ -699,8 +699,10 @@ async fn run_generation_flow(
     // equivalent). The current interop test only verifies L2→L1 message
     // inclusion, so cross-chain base-token transfers would need this added.
     // ----------------------------------------------------------------
-    // Write ecosystem.yaml early — downstream `chain init` / `chain gateway *`
-    // invocations consume it via `--ecosystem <path>`.
+    // Write ecosystem.yaml early — integration-tests reads it back when
+    // bringing up servers and tests. Protocol-ops itself no longer takes
+    // `--ecosystem`; chain-targeted commands take `--bridgehub <addr>
+    // --chain-id <id>` directly.
     let eco_yaml_path = contracts_backend.work_dir().join("ecosystem.yaml");
     let eco_config = integration_tests::l1_state::EcosystemConfig {
         bridgehub: bridgehub.clone(),
@@ -723,8 +725,6 @@ async fn run_generation_flow(
     };
     fs::write(&eco_yaml_path, serde_yaml::to_string(&eco_config)?)?;
     println!("  ecosystem.yaml -> {}", eco_yaml_path.display());
-
-    let eco_path = contracts_backend.work_path("ecosystem.yaml");
 
     // Helper to resolve a chain's diamond proxy from the bridgehub.
     let resolve_diamond = |chain_id: u64| -> Result<String> {
@@ -1031,10 +1031,10 @@ async fn run_generation_flow(
             "convert",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path,
-            "--chain",
-            "gateway",
+            "--bridgehub",
+            &bridgehub,
+            "--chain-id",
+            &gateway_id_str,
             "--gateway-deployer",
             &keys.deployer_addr,
             "--ctm-representative-chain-id",
@@ -1119,10 +1119,10 @@ async fn run_generation_flow(
             "phase-1-submit",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path,
-            "--chain",
-            &ops.dir_name,
+            "--bridgehub",
+            &bridgehub,
+            "--chain-id",
+            &chain_id.to_string(),
             "--gateway-chain-id",
             &gateway_chain_id_str,
             "--gateway-rpc-url",
@@ -1149,10 +1149,10 @@ async fn run_generation_flow(
             "phase-2-finalize",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path,
-            "--chain",
-            &ops.dir_name,
+            "--bridgehub",
+            &bridgehub,
+            "--chain-id",
+            &chain_id.to_string(),
             "--deployer-address",
             &keys.deployer_addr,
             "--gateway-rpc-url",
@@ -1192,10 +1192,10 @@ async fn run_generation_flow(
             "phase-3-validators",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path,
-            "--chain",
-            &ops.dir_name,
+            "--bridgehub",
+            &bridgehub,
+            "--chain-id",
+            &chain_id.to_string(),
             "--gateway-rpc-url",
             &gw_l2_rpc,
             "--commit-operator",

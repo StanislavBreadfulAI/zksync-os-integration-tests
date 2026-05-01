@@ -391,7 +391,7 @@ async fn run_ecosystem_upgrades(
 
     fund_governance_accounts(l1_rpc_url, wallets)?;
 
-    let eco_path_str = contracts_backend.work_path("ecosystem.yaml");
+    let bridgehub = contracts.ecosystem_contracts.bridgehub_proxy_addr.as_str();
     let deployer_key = wallets.ecosystem.deployer.private_key.as_str();
     let governor_key = wallets.ecosystem.governor.private_key.as_str();
     let deployer_addr = wallets.ecosystem.deployer.address.as_str();
@@ -421,8 +421,8 @@ async fn run_ecosystem_upgrades(
             "upgrade-prepare",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path_str,
+            "--bridgehub",
+            bridgehub,
             "--deployer-address",
             deployer_addr,
             "--bytecodes-supplier-address",
@@ -492,8 +492,8 @@ async fn run_ecosystem_upgrades(
             "upgrade-governance",
             "--l1-rpc-url",
             l1_rpc_url,
-            "--ecosystem",
-            &eco_path_str,
+            "--bridgehub",
+            bridgehub,
             "--governance-toml",
             &governance_toml_abs,
             "--out",
@@ -616,13 +616,13 @@ fn run_chain_upgrade(
     l1_rpc_url: &str,
     contracts: &Contracts,
     wallets: &WalletsFile,
-    chain_name: &str,
+    chain_id: u64,
 ) -> Result<()> {
-    let _ = contracts; // kept for signature parity with other upgrade helpers
     println!("\n  Preparing chain upgrade Safe bundle (protocol_ops --simulate)...");
     let governor_key = wallets.ecosystem.governor.private_key.as_str();
     let access_control_restriction = contracts.l1.access_control_restriction_addr.as_str();
-    let eco_path_str = contracts_backend.work_path("ecosystem.yaml");
+    let bridgehub = contracts.ecosystem_contracts.bridgehub_proxy_addr.as_str();
+    let chain_id_str = chain_id.to_string();
 
     let out_rel = "chain_upgrade";
     let out_host = contracts_backend.work_dir().join(out_rel);
@@ -637,10 +637,10 @@ fn run_chain_upgrade(
             l1_rpc_url,
             "--out",
             &out_arg,
-            "--ecosystem",
-            &eco_path_str,
-            "--chain",
-            chain_name,
+            "--bridgehub",
+            bridgehub,
+            "--chain-id",
+            &chain_id_str,
             "--access-control-restriction",
             access_control_restriction,
         ])
@@ -1018,13 +1018,7 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
     println!("Keeping zksync-os-server running during chain upgrade...");
 
     // Run chain upgrade
-    run_chain_upgrade(
-        &contracts_backend,
-        l1_rpc_url,
-        &contracts,
-        &wallets,
-        "default",
-    )?;
+    run_chain_upgrade(&contracts_backend, l1_rpc_url, &contracts, &wallets, 6565)?;
 
     // Verify the protocol version was upgraded to v31
     verify_protocol_version(&contracts_backend, l1_rpc_url, &contracts)?;
