@@ -13,29 +13,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Script output from `protocol_ops ecosystem upgrade-prepare`, read from
-/// the per-command metadata block in `manifest.json`.
+/// Output of `protocol_ops ecosystem upgrade-prepare-all`: the parsed core
+/// upgrade TOML so downstream code can pull deployed addresses out of it.
 #[derive(Clone)]
 struct UpgradePrepareOutput {
+    /// Parsed contents of `v31-upgrade-core.toml` (deployer-broadcast core
+    /// prepare output). Used to resolve the ChainAssetHandler proxy and NTV
+    /// addresses for the test-only ownership-transfer hack.
     core: serde_json::Value,
 }
 
-fn parse_upgrade_prepare_manifest(manifest_path: &Path) -> Result<UpgradePrepareOutput> {
-    let content = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let root: serde_json::Value =
-        serde_json::from_str(&content).context("Failed to parse upgrade-prepare manifest.json")?;
-    let output = root
-        .get("metadata")
-        .and_then(|m| m.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|entry| entry.get("output"))
-        .ok_or_else(|| anyhow::anyhow!("Missing metadata[0].output in manifest"))?;
-    let core = output
-        .get("core")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing output.core in manifest metadata"))?;
-    Ok(UpgradePrepareOutput { core })
+/// Parse `v31-upgrade-core.toml` (written by `CoreUpgrade_v31.noGovernancePrepare`'s
+/// `saveOutput`) into JSON so we can use dotted-key lookups.
+fn parse_core_upgrade_toml(toml_path: &Path) -> Result<serde_json::Value> {
+    let content = fs::read_to_string(toml_path)
+        .with_context(|| format!("Failed to read core upgrade TOML: {}", toml_path.display()))?;
+    let value: toml::Value =
+        toml::from_str(&content).context("Failed to parse v31-upgrade-core.toml")?;
+    serde_json::to_value(value).context("Failed to convert core upgrade TOML to JSON")
 }
 
 fn get_default_preset() -> integration_tests::presets::Preset {
@@ -375,10 +370,13 @@ async fn transfer_new_contracts_ownership(
 
 /// Run ecosystem upgrade stages via direct protocol-ops invocations.
 ///
-/// Phase 1: `ecosystem upgrade-prepare` (deployer) — deploys new contracts.
+/// Phase 1: `ecosystem upgrade-prepare-all` (deployer) — runs Core + per-CTM
+///          `noGovernancePrepare` on one anvil fork, emits per-step governance
+///          TOMLs and a single Safe bundle.
 /// Phase 2: ownership transfers (test-specific impersonation hacks).
-/// Phase 3: `ecosystem upgrade-governance` (governor) — runs governance
-///          stages 0+1+2 on a single anvil fork, emits one Safe bundle.
+/// Phase 3: `ecosystem upgrade-governance` (governor) — replays stages 0/1/2
+///          across the core + per-CTM TOMLs on one anvil fork, emits one Safe
+///          bundle containing all three governance calls.
 ///
 /// Returns the parsed upgrade-prepare output (for use by downstream code).
 async fn run_ecosystem_upgrades(
@@ -392,6 +390,10 @@ async fn run_ecosystem_upgrades(
     fund_governance_accounts(l1_rpc_url, wallets)?;
 
     let bridgehub = contracts.ecosystem_contracts.bridgehub_proxy_addr.as_str();
+    let ctm_proxy = contracts
+        .ecosystem_contracts
+        .state_transition_proxy_addr
+        .as_str();
     let deployer_key = wallets.ecosystem.deployer.private_key.as_str();
     let governor_key = wallets.ecosystem.governor.private_key.as_str();
     let deployer_addr = wallets.ecosystem.deployer.address.as_str();
@@ -402,29 +404,32 @@ async fn run_ecosystem_upgrades(
     // replay stale bundles.
     let run_tag = uuid::Uuid::new_v4();
 
-    // ── Phase 1: upgrade-prepare (deployer) ───────────────────────────────
+    // ── Phase 1: upgrade-prepare-all (deployer) ───────────────────────────
     //
     // TODO(v30-removal): the three pre-v31 override flags below are only
     // needed because the v30 CTMs in this fixture don't expose
     // L1_BYTECODES_SUPPLIER(), isZKsyncOS(), or getRollupDAManager().
     // On v31+ ecosystems protocol-ops auto-resolves them from L1.
     let prepare_dir = format!("upgrade_prepare_{run_tag}");
-    let governance_toml_rel = format!("{prepare_dir}/governance.toml");
-    let manifest_rel = format!("{prepare_dir}/manifest.json");
-    let governance_toml_abs = contracts_backend.work_path(&governance_toml_rel);
     let prepare_out_abs = contracts_backend.work_path(&prepare_dir);
+    let governance_tomls_host = contracts_backend
+        .work_dir()
+        .join(&prepare_dir)
+        .join("governance-tomls");
 
-    println!("\n  Running ecosystem upgrade-prepare ...");
+    println!("\n  Running ecosystem upgrade-prepare-all ...");
     contracts_backend
         .protocol_ops(&[
             "ecosystem",
-            "upgrade-prepare",
+            "upgrade-prepare-all",
             "--l1-rpc-url",
             l1_rpc_url,
             "--bridgehub",
             bridgehub,
             "--deployer-address",
             deployer_addr,
+            "--ctm-proxy",
+            ctm_proxy,
             "--bytecodes-supplier-address",
             contracts
                 .ecosystem_contracts
@@ -434,28 +439,56 @@ async fn run_ecosystem_upgrades(
             contracts.ecosystem_contracts.l1_rollup_da_manager.as_str(),
             "--is-zk-sync-os",
             "true",
-            "--governance-toml-out",
-            &governance_toml_abs,
             "--out",
             &prepare_out_abs,
         ])
-        .context("ecosystem upgrade-prepare failed")?;
+        .context("ecosystem upgrade-prepare-all failed")?;
 
     println!("  Applying prepare Safe bundles (deployer + governor) ...");
-    // upgrade-prepare can emit a governance-broadcast bundle for
+    // upgrade-prepare-all can emit a governance-broadcast bundle for
     // `ensureCtmsAndProxyAdminsOwnedByGovernance` (no-op on the local
     // fixture, but signed by governance) in addition to the deployer's
     // bundles, so both keys must be available to `.apply`.
     contracts_backend
         .parse_safe_bundles(&prepare_dir, l1_rpc_url)?
         .apply(&[deployer_key, governor_key])
-        .context("apply ecosystem-upgrade-prepare Safe bundles")?;
+        .context("apply ecosystem-upgrade-prepare-all Safe bundles")?;
 
-    // Read deployed-address metadata from the manifest's `metadata[0].output`
-    // (consumed by the ownership-transfer hacks below).
-    let manifest_host = contracts_backend.work_dir().join(&manifest_rel);
-    let script_output = parse_upgrade_prepare_manifest(&manifest_host)
-        .context("Failed to read upgrade-prepare metadata from manifest.json")?;
+    // Locate the per-step governance TOMLs (`v31-upgrade-core.toml` plus one
+    // `v31-upgrade-ctm-{addr}.toml` per `--ctm-proxy`) and parse the core
+    // TOML for the deployed addresses consumed by the ownership-transfer
+    // hacks below.
+    let core_toml = governance_tomls_host.join("v31-upgrade-core.toml");
+    anyhow::ensure!(
+        core_toml.exists(),
+        "v31-upgrade-core.toml not found at {} — did upgrade-prepare-all run?",
+        core_toml.display(),
+    );
+    let mut ctm_tomls: Vec<PathBuf> = fs::read_dir(&governance_tomls_host)
+        .with_context(|| {
+            format!(
+                "Failed to read governance-tomls dir: {}",
+                governance_tomls_host.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("v31-upgrade-ctm-") && n.ends_with(".toml"))
+                .unwrap_or(false)
+        })
+        .collect();
+    ctm_tomls.sort();
+    anyhow::ensure!(
+        !ctm_tomls.is_empty(),
+        "no v31-upgrade-ctm-*.toml files found in {}",
+        governance_tomls_host.display(),
+    );
+
+    let core = parse_core_upgrade_toml(&core_toml)
+        .context("Failed to read deployed addresses from v31-upgrade-core.toml")?;
+    let script_output = UpgradePrepareOutput { core };
 
     std::thread::sleep(Duration::from_secs(1));
 
@@ -470,35 +503,40 @@ async fn run_ecosystem_upgrades(
     transfer_governance_ownership_to_governor(contracts_backend, l1_rpc_url, contracts, wallets)
         .await?;
 
-    let governance_toml_host = contracts_backend.work_dir().join(&governance_toml_rel);
-    anyhow::ensure!(
-        governance_toml_host.exists(),
-        "governance.toml not found at {} — did prepare stage write --governance-toml-out?",
-        governance_toml_host.display(),
-    );
-
-    // ── Phase 3: governance stages 0+1 on one fork (governor) ────────────
+    // ── Phase 3: governance stages 0+1+2 on one fork (governor) ──────────
     //
     // Direct `ecosystem upgrade-governance` — one protocol-ops invocation
-    // runs stages 0+1+2 against a single anvil fork, emitting one Safe
-    // bundle containing all three governance calls.
+    // replays stages 0/1/2 across the core TOML + per-CTM TOMLs against a
+    // single anvil fork, emitting one Safe bundle containing all governance
+    // calls.
     let governance_dir = format!("upgrade_governance_{run_tag}");
     let governance_out_abs = contracts_backend.work_path(&governance_dir);
 
+    let core_toml_arg = core_toml.to_string_lossy().to_string();
+    let ctm_toml_args: Vec<String> = ctm_tomls
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let mut args: Vec<&str> = vec![
+        "ecosystem",
+        "upgrade-governance",
+        "--l1-rpc-url",
+        l1_rpc_url,
+        "--bridgehub",
+        bridgehub,
+        "--governance-toml",
+        &core_toml_arg,
+    ];
+    for ctm_arg in &ctm_toml_args {
+        args.push("--governance-toml");
+        args.push(ctm_arg);
+    }
+    args.push("--out");
+    args.push(&governance_out_abs);
+
     println!("\n  Running ecosystem upgrade-governance (stages 0+1+2) ...");
     contracts_backend
-        .protocol_ops(&[
-            "ecosystem",
-            "upgrade-governance",
-            "--l1-rpc-url",
-            l1_rpc_url,
-            "--bridgehub",
-            bridgehub,
-            "--governance-toml",
-            &governance_toml_abs,
-            "--out",
-            &governance_out_abs,
-        ])
+        .protocol_ops(&args)
         .context("ecosystem upgrade-governance failed")?;
 
     println!("  Applying governance Safe bundles (governor) ...");
@@ -754,7 +792,7 @@ fn run_stage3_token_migration(
     contracts_backend
         .forge_script(
             &[
-                "deploy-scripts/upgrade/v31/EcosystemUpgrade_v31.s.sol:EcosystemUpgrade_v31",
+                "deploy-scripts/upgrade/v31/CoreUpgrade_v31.s.sol:CoreUpgrade_v31",
                 "--sig",
                 "stage3(address)",
                 bridgehub,
