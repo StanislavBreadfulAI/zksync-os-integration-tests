@@ -23,16 +23,6 @@ struct UpgradePrepareOutput {
     core: serde_json::Value,
 }
 
-/// Parse `v31-upgrade-core.toml` (written by `CoreUpgrade_v31.noGovernancePrepare`'s
-/// `saveOutput`) into JSON so we can use dotted-key lookups.
-fn parse_core_upgrade_toml(toml_path: &Path) -> Result<serde_json::Value> {
-    let content = fs::read_to_string(toml_path)
-        .with_context(|| format!("Failed to read core upgrade TOML: {}", toml_path.display()))?;
-    let value: toml::Value =
-        toml::from_str(&content).context("Failed to parse v31-upgrade-core.toml")?;
-    serde_json::to_value(value).context("Failed to convert core upgrade TOML to JSON")
-}
-
 fn get_default_preset() -> integration_tests::presets::Preset {
     integration_tests::presets::load_current_preset().expect("Failed to load preset")
 }
@@ -412,10 +402,6 @@ async fn run_ecosystem_upgrades(
     // On v31+ ecosystems protocol-ops auto-resolves them from L1.
     let prepare_dir = format!("upgrade_prepare_{run_tag}");
     let prepare_out_abs = contracts_backend.work_path(&prepare_dir);
-    let governance_tomls_host = contracts_backend
-        .work_dir()
-        .join(&prepare_dir)
-        .join("governance-tomls");
 
     println!("\n  Running ecosystem upgrade-prepare-all ...");
     // `--env local` is required for the PUH/Guardians redeploy step in v31+
@@ -460,39 +446,37 @@ async fn run_ecosystem_upgrades(
         .apply(&[deployer_key, governor_key])
         .context("apply ecosystem-upgrade-prepare-all Safe bundles")?;
 
-    // Locate the per-step governance TOMLs (`v31-upgrade-core.toml` plus one
-    // `v31-upgrade-ctm-{addr}.toml` per `--ctm-proxy`) and parse the core
-    // TOML for the deployed addresses consumed by the ownership-transfer
-    // hacks below. Host paths drive `fs::read_dir` / `parse_core_upgrade_toml`;
-    // backend-translated `work_path` paths get passed to protocol_ops since it
-    // may run inside a docker container with the work dir mounted under a
-    // different prefix.
-    let core_toml_host = governance_tomls_host.join("v31-upgrade-core.toml");
+    // The v31 era-contracts upgrade-prepare-all now emits a single merged
+    // `<out>/governance.toml` (combined stage 0/1/2 calls across core + every
+    // `--ctm-proxy`) and no longer copies per-step TOMLs to
+    // `<out>/governance-tomls/`. The per-step files still exist inside the
+    // container at `l1-contracts/script-out/`; we read the core one from
+    // there to recover the deployed-addresses metadata used by the
+    // ownership-transfer hack below, and we hand the merged TOML straight to
+    // `upgrade-governance`.
+    let merged_governance_toml_host = contracts_backend
+        .work_dir()
+        .join(&prepare_dir)
+        .join("governance.toml");
     anyhow::ensure!(
-        core_toml_host.exists(),
-        "v31-upgrade-core.toml not found at {} — did upgrade-prepare-all run?",
-        core_toml_host.display(),
-    );
-    let mut ctm_toml_filenames: Vec<String> = fs::read_dir(&governance_tomls_host)
-        .with_context(|| {
-            format!(
-                "Failed to read governance-tomls dir: {}",
-                governance_tomls_host.display()
-            )
-        })?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with("v31-upgrade-ctm-") && n.ends_with(".toml"))
-        .collect();
-    ctm_toml_filenames.sort();
-    anyhow::ensure!(
-        !ctm_toml_filenames.is_empty(),
-        "no v31-upgrade-ctm-*.toml files found in {}",
-        governance_tomls_host.display(),
+        merged_governance_toml_host.exists(),
+        "governance.toml not found at {} — did upgrade-prepare-all run?",
+        merged_governance_toml_host.display(),
     );
 
-    let core = parse_core_upgrade_toml(&core_toml_host)
-        .context("Failed to read deployed addresses from v31-upgrade-core.toml")?;
+    let core_toml_repo_path = "l1-contracts/script-out/v31-upgrade-core.toml";
+    let core_toml_content = contracts_backend
+        .read_repo_file(core_toml_repo_path)
+        .with_context(|| {
+            format!(
+                "Failed to read {core_toml_repo_path} from era-contracts (did upgrade-prepare-all's CoreUpgrade_v31 script run?)"
+            )
+        })?;
+    let core: serde_json::Value = {
+        let value: toml::Value =
+            toml::from_str(&core_toml_content).context("parse v31-upgrade-core.toml")?;
+        serde_json::to_value(value).context("convert v31-upgrade-core.toml to JSON")?
+    };
     let script_output = UpgradePrepareOutput { core };
 
     std::thread::sleep(Duration::from_secs(1));
@@ -511,20 +495,14 @@ async fn run_ecosystem_upgrades(
     // ── Phase 3: governance stages 0+1+2 on one fork (governor) ──────────
     //
     // Direct `ecosystem upgrade-governance` — one protocol-ops invocation
-    // replays stages 0/1/2 across the core TOML + per-CTM TOMLs against a
-    // single anvil fork, emitting one Safe bundle containing all governance
-    // calls.
+    // replays stages 0/1/2 from the merged governance TOML against a single
+    // anvil fork, emitting one Safe bundle containing all governance calls.
     let governance_dir = format!("upgrade_governance_{run_tag}");
     let governance_out_abs = contracts_backend.work_path(&governance_dir);
 
-    let core_toml_arg = contracts_backend.work_path(&format!(
-        "{prepare_dir}/governance-tomls/v31-upgrade-core.toml"
-    ));
-    let ctm_toml_args: Vec<String> = ctm_toml_filenames
-        .iter()
-        .map(|name| contracts_backend.work_path(&format!("{prepare_dir}/governance-tomls/{name}")))
-        .collect();
-    let mut args: Vec<&str> = vec![
+    let merged_governance_toml_arg =
+        contracts_backend.work_path(&format!("{prepare_dir}/governance.toml"));
+    let args: Vec<&str> = vec![
         "ecosystem",
         "upgrade-governance",
         "--l1-rpc-url",
@@ -532,14 +510,10 @@ async fn run_ecosystem_upgrades(
         "--bridgehub",
         bridgehub,
         "--governance-toml",
-        &core_toml_arg,
+        &merged_governance_toml_arg,
+        "--out",
+        &governance_out_abs,
     ];
-    for ctm_arg in &ctm_toml_args {
-        args.push("--governance-toml");
-        args.push(ctm_arg);
-    }
-    args.push("--out");
-    args.push(&governance_out_abs);
 
     println!("\n  Running ecosystem upgrade-governance (stages 0+1+2) ...");
     contracts_backend
