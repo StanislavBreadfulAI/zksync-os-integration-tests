@@ -457,36 +457,35 @@ async fn run_ecosystem_upgrades(
     // Locate the per-step governance TOMLs (`v31-upgrade-core.toml` plus one
     // `v31-upgrade-ctm-{addr}.toml` per `--ctm-proxy`) and parse the core
     // TOML for the deployed addresses consumed by the ownership-transfer
-    // hacks below.
-    let core_toml = governance_tomls_host.join("v31-upgrade-core.toml");
+    // hacks below. Host paths drive `fs::read_dir` / `parse_core_upgrade_toml`;
+    // backend-translated `work_path` paths get passed to protocol_ops since it
+    // may run inside a docker container with the work dir mounted under a
+    // different prefix.
+    let core_toml_host = governance_tomls_host.join("v31-upgrade-core.toml");
     anyhow::ensure!(
-        core_toml.exists(),
+        core_toml_host.exists(),
         "v31-upgrade-core.toml not found at {} — did upgrade-prepare-all run?",
-        core_toml.display(),
+        core_toml_host.display(),
     );
-    let mut ctm_tomls: Vec<PathBuf> = fs::read_dir(&governance_tomls_host)
+    let mut ctm_toml_filenames: Vec<String> = fs::read_dir(&governance_tomls_host)
         .with_context(|| {
             format!(
                 "Failed to read governance-tomls dir: {}",
                 governance_tomls_host.display()
             )
         })?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("v31-upgrade-ctm-") && n.ends_with(".toml"))
-                .unwrap_or(false)
-        })
+        .filter_map(|entry| entry.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("v31-upgrade-ctm-") && n.ends_with(".toml"))
         .collect();
-    ctm_tomls.sort();
+    ctm_toml_filenames.sort();
     anyhow::ensure!(
-        !ctm_tomls.is_empty(),
+        !ctm_toml_filenames.is_empty(),
         "no v31-upgrade-ctm-*.toml files found in {}",
         governance_tomls_host.display(),
     );
 
-    let core = parse_core_upgrade_toml(&core_toml)
+    let core = parse_core_upgrade_toml(&core_toml_host)
         .context("Failed to read deployed addresses from v31-upgrade-core.toml")?;
     let script_output = UpgradePrepareOutput { core };
 
@@ -512,10 +511,11 @@ async fn run_ecosystem_upgrades(
     let governance_dir = format!("upgrade_governance_{run_tag}");
     let governance_out_abs = contracts_backend.work_path(&governance_dir);
 
-    let core_toml_arg = core_toml.to_string_lossy().to_string();
-    let ctm_toml_args: Vec<String> = ctm_tomls
+    let core_toml_arg =
+        contracts_backend.work_path(&format!("{prepare_dir}/governance-tomls/v31-upgrade-core.toml"));
+    let ctm_toml_args: Vec<String> = ctm_toml_filenames
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|name| contracts_backend.work_path(&format!("{prepare_dir}/governance-tomls/{name}")))
         .collect();
     let mut args: Vec<&str> = vec![
         "ecosystem",
