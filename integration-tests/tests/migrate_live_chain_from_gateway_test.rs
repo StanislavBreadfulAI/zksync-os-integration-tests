@@ -396,9 +396,20 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     // `Migrator.forwardedBridgeBurn` reverts with `NotAllBatchesExecuted` if
     // `totalBatchesCommitted != totalBatchesExecuted` on the chain's
     // gateway-side diamond, so wait for the chain to drain its execute queue
-    // before submitting the migration. With block_time=250ms and
-    // batch_timeout=1s, even an idle chain seals empty batches every ~1s, so
-    // commit and execute can briefly diverge here.
+    // before submitting the migration.
+    //
+    // With block_time=250ms and batch_timeout=1s, the chain seals an empty
+    // batch every ~1s. In CI the commit→prove→execute round-trip via gateway
+    // L2 is slower than batch sealing, so a steady-state 1-batch lag forms
+    // and `committed == executed` is never observed while the chain keeps
+    // producing. Stop the chain server first; the migration tx targets the
+    // gateway and doesn't need the chain server running. The L1 sender
+    // drains in-flight commit/prove/execute sequentially before exit, so
+    // once the server is down the gateway-side counters converge.
+    println!("  Stopping chain server to drain its commit/prove/execute pipeline...");
+    chain_server
+        .stop()
+        .map_err(|e| anyhow::anyhow!("stop chain server before migration: {e:?}"))?;
     {
         let gw_side_chain = IZKChain::new(gw_side_chain_diamond, &gw_l2_provider);
         let start = std::time::Instant::now();
@@ -427,7 +438,9 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
                     start.elapsed().as_secs_f64(),
                 );
             }
-            // Drive the gateway one batch so its execute pipeline advances.
+            // Drive the gateway one batch so its execute pipeline advances
+            // (still needed because gateway batches the chain's commit/
+            // prove/execute txs into its own batches).
             let _ = gw_server
                 .wait_for_traffic_tx_executed_on_l1()
                 .context("drive gateway while waiting for execute queue to drain")?;
