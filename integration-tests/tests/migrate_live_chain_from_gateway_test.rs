@@ -190,20 +190,21 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         .wait_for_traffic_tx_executed_on_l1()
         .context("gateway-settling chain batches (pre-migration)")?;
 
-    // Stop the chain server now that the fixture is verified. None of the
-    // remaining migration phases (pause-deposits / submit / finalize /
-    // set-da-validator-pair) hit the chain — they all run against L1 and
-    // the gateway. Keeping the chain running here only causes problems:
-    // with block_time=250ms + batch_timeout=1s the chain seals empty
-    // batches every ~1s, and on slower hosts the commit→prove→execute
-    // round-trip via gateway L2 lags batch sealing, leaving a steady-state
-    // committed > executed gap that makes `Migrator.forwardedBridgeBurn`
-    // revert with `NotAllBatchesExecuted` during phase-1-submit. Stopping
-    // here freezes the gateway-side counters at a quiescent point.
-    println!("  Stopping chain server before migration (not needed past sanity check)");
+    // Force-kill the chain server now (SIGKILL via `docker kill`, no SIGTERM
+    // grace period). With block_time=250ms + batch_timeout=1s the chain
+    // seals empty batches every ~1s; on slower hosts the commit→prove→
+    // execute round-trip via gateway L2 lags batch sealing, leaving a
+    // steady-state `committed > executed` gap on the gateway-side chain
+    // diamond. `Migrator.forwardedBridgeBurn` requires
+    // `totalBatchesCommitted == totalBatchesExecuted`, so we need to stop
+    // batch production before phase-1-submit. The remaining migration
+    // phases run against L1 + the gateway, so the chain server isn't
+    // needed past this point. `stop()` doesn't help here — its 10s SIGTERM
+    // grace lets the L1 sender keep submitting commits in the background.
+    println!("  Force-killing chain server (not needed past sanity check)");
     chain_server
-        .stop()
-        .map_err(|e| anyhow::anyhow!("stop chain server before migration: {e:?}"))?;
+        .kill()
+        .map_err(|e| anyhow::anyhow!("kill chain server before migration: {e:?}"))?;
 
     let eco_dir = integration_tests::l1_state::resolve_ecosystem_dir(&preset)?;
     let contracts_backend =
@@ -406,12 +407,16 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         }
     }
 
-    // The chain server was stopped before phase 0, so no new batches are
-    // being produced; in-flight commit/prove/execute on gateway L2 should
-    // settle within a few gateway batches. Wait for the gateway-side
-    // diamond's `totalBatchesCommitted == totalBatchesExecuted` before
-    // submitting the migration — `Migrator.forwardedBridgeBurn` reverts
-    // with `NotAllBatchesExecuted` otherwise.
+    // The chain keeps producing batches every ~1s while we set up the
+    // migration, and on slow hosts the commit→prove→execute round-trip via
+    // gateway L2 lags batch sealing. `Migrator.forwardedBridgeBurn` requires
+    // `totalBatchesCommitted == totalBatchesExecuted` on the gateway-side
+    // chain diamond, but the chain's L1 sender keeps the counters mismatched
+    // most of the time. Within each commit→prove→execute cycle there's a
+    // brief window where executed catches up to committed before the next
+    // commit lands; poll fast enough to catch it. Once observed, we submit
+    // phase-1 immediately on the same Anvil block — the migration tx then
+    // runs against the same matched-counters state we just observed.
     {
         let gw_side_chain = IZKChain::new(gw_side_chain_diamond, &gw_l2_provider);
         let start = std::time::Instant::now();
@@ -440,12 +445,7 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
                     start.elapsed().as_secs_f64(),
                 );
             }
-            // Drive the gateway one batch so its execute pipeline advances
-            // (gateway batches the chain's commit/prove/execute txs into
-            // its own batches).
-            let _ = gw_server
-                .wait_for_traffic_tx_executed_on_l1()
-                .context("drive gateway while waiting for execute queue to drain")?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -600,9 +600,10 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     // envelope-rebuild divergence as `interop_roots` did, and block replay
     // against the new SL context.
     //
-    // For now, clean up the still-running pre-migration chain server and
+    // For now, clean up the still-running pre-migration servers and
     // stop here so the migration-from-gateway flow itself is exercised.
-    let _ = chain_server.kill();
+    // (The chain server was already force-killed right after the sanity
+    // check.)
     let _ = gw_server.kill();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = anvil.kill();
