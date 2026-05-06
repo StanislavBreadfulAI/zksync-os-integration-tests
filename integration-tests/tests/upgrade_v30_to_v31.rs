@@ -418,10 +418,16 @@ async fn run_ecosystem_upgrades(
         .join("governance-tomls");
 
     println!("\n  Running ecosystem upgrade-prepare-all ...");
+    // `--env local` is required for the PUH/Guardians redeploy step in v31+
+    // era-contracts (it reads `era_chain_id` from
+    // `upgrade-envs/permanent-values/local.toml`). Explicit flags below still
+    // override anything the env preset would supply.
     contracts_backend
         .protocol_ops(&[
             "ecosystem",
             "upgrade-prepare-all",
+            "--env",
+            "local",
             "--l1-rpc-url",
             l1_rpc_url,
             "--bridgehub",
@@ -511,8 +517,9 @@ async fn run_ecosystem_upgrades(
     let governance_dir = format!("upgrade_governance_{run_tag}");
     let governance_out_abs = contracts_backend.work_path(&governance_dir);
 
-    let core_toml_arg =
-        contracts_backend.work_path(&format!("{prepare_dir}/governance-tomls/v31-upgrade-core.toml"));
+    let core_toml_arg = contracts_backend.work_path(&format!(
+        "{prepare_dir}/governance-tomls/v31-upgrade-core.toml"
+    ));
     let ctm_toml_args: Vec<String> = ctm_toml_filenames
         .iter()
         .map(|name| contracts_backend.work_path(&format!("{prepare_dir}/governance-tomls/{name}")))
