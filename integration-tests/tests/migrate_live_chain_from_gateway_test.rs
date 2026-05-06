@@ -417,9 +417,7 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
                 .context("getTotalBatchesExecuted on gateway-side chain diamond")?
                 ._0;
             if committed == executed {
-                println!(
-                    "  Chain has drained execute queue (committed = executed = {committed})"
-                );
+                println!("  Chain has drained execute queue (committed = executed = {committed})");
                 break;
             }
             if start.elapsed() >= deadline {
