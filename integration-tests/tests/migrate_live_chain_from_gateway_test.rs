@@ -190,6 +190,21 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         .wait_for_traffic_tx_executed_on_l1()
         .context("gateway-settling chain batches (pre-migration)")?;
 
+    // Stop the chain server now that the fixture is verified. None of the
+    // remaining migration phases (pause-deposits / submit / finalize /
+    // set-da-validator-pair) hit the chain — they all run against L1 and
+    // the gateway. Keeping the chain running here only causes problems:
+    // with block_time=250ms + batch_timeout=1s the chain seals empty
+    // batches every ~1s, and on slower hosts the commit→prove→execute
+    // round-trip via gateway L2 lags batch sealing, leaving a steady-state
+    // committed > executed gap that makes `Migrator.forwardedBridgeBurn`
+    // revert with `NotAllBatchesExecuted` during phase-1-submit. Stopping
+    // here freezes the gateway-side counters at a quiescent point.
+    println!("  Stopping chain server before migration (not needed past sanity check)");
+    chain_server
+        .stop()
+        .map_err(|e| anyhow::anyhow!("stop chain server before migration: {e:?}"))?;
+
     let eco_dir = integration_tests::l1_state::resolve_ecosystem_dir(&preset)?;
     let contracts_backend =
         EraContractsBackend::from_preset(&preset, "migrate_live_chain_from_gateway", &[])?;
@@ -391,25 +406,12 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         }
     }
 
-    // After pause-deposits propagates, the chain may still have batches that
-    // were committed before the pause but haven't executed yet. The gateway's
-    // `Migrator.forwardedBridgeBurn` reverts with `NotAllBatchesExecuted` if
-    // `totalBatchesCommitted != totalBatchesExecuted` on the chain's
-    // gateway-side diamond, so wait for the chain to drain its execute queue
-    // before submitting the migration.
-    //
-    // With block_time=250ms and batch_timeout=1s, the chain seals an empty
-    // batch every ~1s. In CI the commit→prove→execute round-trip via gateway
-    // L2 is slower than batch sealing, so a steady-state 1-batch lag forms
-    // and `committed == executed` is never observed while the chain keeps
-    // producing. Stop the chain server first; the migration tx targets the
-    // gateway and doesn't need the chain server running. The L1 sender
-    // drains in-flight commit/prove/execute sequentially before exit, so
-    // once the server is down the gateway-side counters converge.
-    println!("  Stopping chain server to drain its commit/prove/execute pipeline...");
-    chain_server
-        .stop()
-        .map_err(|e| anyhow::anyhow!("stop chain server before migration: {e:?}"))?;
+    // The chain server was stopped before phase 0, so no new batches are
+    // being produced; in-flight commit/prove/execute on gateway L2 should
+    // settle within a few gateway batches. Wait for the gateway-side
+    // diamond's `totalBatchesCommitted == totalBatchesExecuted` before
+    // submitting the migration — `Migrator.forwardedBridgeBurn` reverts
+    // with `NotAllBatchesExecuted` otherwise.
     {
         let gw_side_chain = IZKChain::new(gw_side_chain_diamond, &gw_l2_provider);
         let start = std::time::Instant::now();
@@ -439,8 +441,8 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
                 );
             }
             // Drive the gateway one batch so its execute pipeline advances
-            // (still needed because gateway batches the chain's commit/
-            // prove/execute txs into its own batches).
+            // (gateway batches the chain's commit/prove/execute txs into
+            // its own batches).
             let _ = gw_server
                 .wait_for_traffic_tx_executed_on_l1()
                 .context("drive gateway while waiting for execute queue to drain")?;
