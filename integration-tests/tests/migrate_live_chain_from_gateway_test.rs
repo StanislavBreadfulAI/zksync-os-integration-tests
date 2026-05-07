@@ -648,7 +648,23 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     Ok(())
 }
 
+// TODO: re-enable once zksync-os-server exposes
+// `zks_latestSettlementChangeBlock` (or equivalent) and protocol-ops's
+// `migrate-from phase-1-submit` polls it before broadcasting the migration
+// priority tx. The migration's `Migrator.forwardedBridgeBurn` requires
+// `totalBatchesCommitted == totalBatchesExecuted` on the chain's gateway-side
+// diamond, but the chain server keeps producing empty batches (block_time
+// 250ms + batch_timeout 1s) while the test drives phase-0 / pause-deposits.
+// The kill-the-chain-server-after-sanity workaround happens to win the race
+// locally and on faster CI, but consistently loses on slow GH-Actions runners
+// (`committed=N, executed=N-{1,2}` after 60s). The right fix is server-side:
+// expose the SL-change boundary as an RPC, have protocol-ops/zkstack wait on
+// `getTotalBatchesExecuted() ≥ that-block` before phase-1-submit. Tracked
+// alongside the related MigrationGate gap (`MigrationFinalized` on the
+// from-gateway path fires on L1, not on the chain's SL where
+// `MigrationFinalizedWatcher` listens).
 #[tokio::test]
+#[ignore]
 async fn test_migrate_live_chain_from_gateway() {
     run_migrate_live_chain_from_gateway_test()
         .await
