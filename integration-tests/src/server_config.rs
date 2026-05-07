@@ -44,6 +44,9 @@ pub struct ServerConfigBuilder {
 struct ServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     general: Option<GeneralSection>,
+    l1_provider: ProviderSection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_provider: Option<ProviderSection>,
     genesis: GenesisSection,
     l1_watcher: L1WatcherSection,
     l1_sender: L1SenderSection,
@@ -66,17 +69,21 @@ struct GeneralSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     ephemeral_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    gateway_rpc_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     gateway_chain_id: Option<u64>,
-    /// Default is 7s — the main contributor to commit→prove→execute pipeline
-    /// latency in tests. Each pipeline stage waits one full poll cycle for
-    /// the L1 watcher to observe the prior stage's tx, so 7s × 3 ≈ 21s of
-    /// pure polling.
-    l1_rpc_poll_interval: String,
-    /// Same idea as [`Self::l1_rpc_poll_interval`] for gateway-settling
-    /// chains (the server polls the gateway instead of L1).
-    gateway_rpc_poll_interval: String,
+}
+
+/// Mirrors zksync-os-server's `ProviderConfig` (introduced in #1257). Used
+/// for both `l1_provider` and `gateway_provider` sections — the server's
+/// schema flattens both under the same Rust type. We only set rpc_url +
+/// rpc_poll_interval; max_retries / retry_backoff use the server defaults.
+#[derive(Serialize)]
+struct ProviderSection {
+    rpc_url: String,
+    /// Server default is 7s — the main contributor to commit→prove→execute
+    /// pipeline latency in tests. Each pipeline stage waits one full poll
+    /// cycle for the L1 watcher to observe the prior stage's tx, so
+    /// 7s × 3 ≈ 21s of pure polling. Override to 100ms.
+    rpc_poll_interval: String,
 }
 
 #[derive(Serialize)]
@@ -252,10 +259,20 @@ impl ServerConfigBuilder {
         let general = Some(GeneralSection {
             ephemeral: if self.ephemeral { Some(true) } else { None },
             ephemeral_state: self.ephemeral_state.clone(),
-            gateway_rpc_url: self.gateway_rpc_url.clone(),
             gateway_chain_id: self.gateway_chain_id,
-            l1_rpc_poll_interval: "100ms".to_string(),
-            gateway_rpc_poll_interval: "100ms".to_string(),
+        });
+        // L1 provider rpc_url is normally injected via env var
+        // (`L1_PROVIDER_RPC_URL`) by the test harness, but the YAML must
+        // still declare the section so other defaults serialize cleanly.
+        // The server-side default `http://localhost:8545` works as a
+        // placeholder that the env var will override.
+        let l1_provider = ProviderSection {
+            rpc_url: "http://localhost:8545".to_string(),
+            rpc_poll_interval: "100ms".to_string(),
+        };
+        let gateway_provider = self.gateway_rpc_url.as_ref().map(|url| ProviderSection {
+            rpc_url: url.clone(),
+            rpc_poll_interval: "100ms".to_string(),
         });
 
         let mut forced_prices = BTreeMap::new();
@@ -269,6 +286,8 @@ impl ServerConfigBuilder {
 
         let config = ServerConfig {
             general,
+            l1_provider,
+            gateway_provider,
             genesis: GenesisSection {
                 bridgehub_address: self.bridgehub.clone(),
                 bytecode_supplier_address: self.bytecodes_supplier.clone(),

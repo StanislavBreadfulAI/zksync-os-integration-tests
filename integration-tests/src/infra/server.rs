@@ -529,7 +529,9 @@ impl Server {
                 .arg("-p")
                 .arg(format!("{}:3050", host_port))
                 .arg("-e")
-                .arg(format!("GENERAL_L1_RPC_URL={}", builder.l1_rpc_url));
+                // Post-#1257: env-var path moved from `general` to
+                // `l1_provider`. Same for the gateway URL just below.
+                .arg(format!("L1_PROVIDER_RPC_URL={}", builder.l1_rpc_url));
             if let Some(ref gw_url) = builder.gateway_rpc_url {
                 // Remap localhost to host.docker.internal so the container can
                 // reach the gateway server running on the host.
@@ -537,7 +539,7 @@ impl Server {
                     .replace("://localhost:", "://host.docker.internal:")
                     .replace("://127.0.0.1:", "://host.docker.internal:");
                 cmd.arg("-e")
-                    .arg(format!("general_gateway_rpc_url={}", docker_gw_url));
+                    .arg(format!("gateway_provider_rpc_url={}", docker_gw_url));
             }
             // genesis.json must sit next to config.yaml in the same directory.
             if config_dir.join("genesis.json").exists() {
@@ -1087,10 +1089,13 @@ impl LocalServerRuntime {
         cmd.arg("--config")
             .arg(&self.config_path)
             .current_dir(&self.server_root)
-            .env("GENERAL_L1_RPC_URL", &self.l1_rpc_url)
+            // Post-#1257 (zksync-os-server): the L1/gateway RPC URLs moved
+            // out of `general` into dedicated `l1_provider`/`gateway_provider`
+            // config sections, with env-var paths to match.
+            .env("L1_PROVIDER_RPC_URL", &self.l1_rpc_url)
             .env("rpc_address", format!("0.0.0.0:{}", self.host_port));
         if let Some(ref gw_url) = self.gateway_rpc_url {
-            cmd.env("general_gateway_rpc_url", gw_url);
+            cmd.env("gateway_provider_rpc_url", gw_url);
         }
         if !self.ephemeral {
             // In ephemeral mode the server creates its own tempdir for RocksDB;
