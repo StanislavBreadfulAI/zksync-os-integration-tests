@@ -447,7 +447,7 @@ async fn run_ecosystem_upgrades(
         .context("apply ecosystem-upgrade-prepare-all Safe bundles")?;
 
     // The v31 era-contracts upgrade-prepare-all now emits a single merged
-    // `<out>/governance.toml` (combined stage 0/1/2 calls across core + every
+    // `<out>/ecosystem.toml` (combined stage 0/1/2 calls across core + every
     // `--ctm-proxy`) and no longer copies per-step TOMLs to
     // `<out>/governance-tomls/`. The per-step files still exist inside the
     // container at `l1-contracts/script-out/`; we read the core one from
@@ -457,10 +457,10 @@ async fn run_ecosystem_upgrades(
     let merged_governance_toml_host = contracts_backend
         .work_dir()
         .join(&prepare_dir)
-        .join("governance.toml");
+        .join("ecosystem.toml");
     anyhow::ensure!(
         merged_governance_toml_host.exists(),
-        "governance.toml not found at {} — did upgrade-prepare-all run?",
+        "ecosystem.toml not found at {} — did upgrade-prepare-all run?",
         merged_governance_toml_host.display(),
     );
 
@@ -501,7 +501,7 @@ async fn run_ecosystem_upgrades(
     let governance_out_abs = contracts_backend.work_path(&governance_dir);
 
     let merged_governance_toml_arg =
-        contracts_backend.work_path(&format!("{prepare_dir}/governance.toml"));
+        contracts_backend.work_path(&format!("{prepare_dir}/ecosystem.toml"));
     let args: Vec<&str> = vec![
         "ecosystem",
         "upgrade-governance",
