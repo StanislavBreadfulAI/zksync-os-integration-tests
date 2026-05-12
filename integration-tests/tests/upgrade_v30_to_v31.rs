@@ -825,6 +825,121 @@ fn read_u64_from_cast_call_with_args(
         .with_context(|| format!("Failed to parse decimal value '{}'", first))
 }
 
+fn read_address_from_cast_call(
+    contracts_backend: &EraContractsBackend,
+    l1_rpc_url: &str,
+    contract: &str,
+    sig: &str,
+) -> Result<String> {
+    let raw = contracts_backend
+        .cast(&["call", contract, sig, "--rpc-url", l1_rpc_url])
+        .with_context(|| format!("Failed to call {} on {}", sig, contract))?;
+    Ok(raw.trim().split_whitespace().next().unwrap_or("").to_string())
+}
+
+/// Deploy era-contracts' `TestnetERC20Token` via `cast send --create`. Returns
+/// the deployed L1 address.
+fn deploy_test_erc20(
+    contracts_backend: &EraContractsBackend,
+    l1_rpc_url: &str,
+    private_key: &str,
+) -> Result<String> {
+    let artifact_json = contracts_backend
+        .read_repo_file("l1-contracts/out/TestnetERC20Token.sol/TestnetERC20Token.json")
+        .context("read TestnetERC20Token artifact")?;
+    let artifact: serde_json::Value =
+        serde_json::from_str(&artifact_json).context("parse TestnetERC20Token artifact JSON")?;
+    let bytecode = artifact
+        .get("bytecode")
+        .and_then(|b| b.get("object"))
+        .and_then(|o| o.as_str())
+        .context("artifact missing bytecode.object")?;
+    // `cast send --create` is a subcommand: global flags (--rpc-url,
+    // --private-key, --json) must come *before* `--create`, because everything
+    // after `--create` is consumed as the `<CODE> <SIG> <ARGS>...` positionals.
+    let raw = contracts_backend
+        .cast(&[
+            "send",
+            "--rpc-url",
+            l1_rpc_url,
+            "--private-key",
+            private_key,
+            "--json",
+            "--create",
+            bytecode,
+            "constructor(string,string,uint8)",
+            "TestERC20",
+            "TST",
+            "18",
+        ])
+        .context("cast send --create TestnetERC20Token")?;
+    let json: serde_json::Value = serde_json::from_str(raw.trim())
+        .context("parse cast send --create JSON output")?;
+    json.get("contractAddress")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .context("cast --create JSON missing contractAddress")
+}
+
+fn read_bytes32_from_cast_call(
+    contracts_backend: &EraContractsBackend,
+    l1_rpc_url: &str,
+    contract: &str,
+    sig: &str,
+    fn_args: &[&str],
+) -> Result<String> {
+    let mut args: Vec<&str> = vec!["call", contract, sig];
+    args.extend_from_slice(fn_args);
+    args.extend_from_slice(&["--rpc-url", l1_rpc_url]);
+    let raw = contracts_backend
+        .cast(&args)
+        .with_context(|| format!("Failed to call {} on {}", sig, contract))?;
+    Ok(raw.trim().split_whitespace().next().unwrap_or("").to_string())
+}
+
+/// Dump the per-(chainId, assetId) accounting on L1AssetTracker + NTV at a
+/// point in the upgrade flow. We need uint256 (not u64) so we just print the
+/// raw `cast` output as a string and let the reader compare values.
+fn dump_asset_accounting(
+    label: &str,
+    contracts_backend: &EraContractsBackend,
+    l1_rpc_url: &str,
+    asset_tracker_addr: &str,
+    ntv_addr: &str,
+    chain_id: u64,
+    asset_id: &str,
+) {
+    let chain_id_str = chain_id.to_string();
+    let call = |contract: &str, sig: &str, args: &[&str]| -> String {
+        let mut a: Vec<&str> = vec!["call", contract, sig];
+        a.extend_from_slice(args);
+        a.extend_from_slice(&["--rpc-url", l1_rpc_url]);
+        match contracts_backend.cast(&a) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => format!("<err: {e}>"),
+        }
+    };
+    let at_balance = call(
+        asset_tracker_addr,
+        "chainBalance(uint256,bytes32)(uint256)",
+        &[&chain_id_str, asset_id],
+    );
+    let ntv_balance = call(
+        ntv_addr,
+        "chainBalance(uint256,bytes32)(uint256)",
+        &[&chain_id_str, asset_id],
+    );
+    // NOTE: `interopInfo` (preV31ChainBalance / totalDepositedFromL1 /
+    // totalClaimedOnL1) is `internal` on L1AssetTracker — no public getter to
+    // dump from cast. The deposit-path code increments
+    // `interopInfo[chain][asset].totalDepositedFromL1` whenever it increments
+    // `chainBalance`, so verifying `chainBalance` here is sufficient for the
+    // CTM-upgraded/chain-not-upgraded window scenario.
+    println!("  [{label}] accounting for chain {chain_id} / asset {asset_id}:");
+    println!("    L1AssetTracker.chainBalance = {at_balance}");
+    println!("    NTV.chainBalance            = {ntv_balance}");
+}
+
 fn schedule_upgrade_timestamp(
     contracts_backend: &EraContractsBackend,
     l1_rpc_url: &str,
@@ -980,6 +1095,58 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
             )
         })?;
 
+    // Deploy an L1 ERC20 and deposit it once to chain 6565 PRE-UPGRADE so the
+    // post-CTM experiments have a "legacy" token (in NTV's v30 registry but
+    // not in the freshly-deployed v31 AssetTracker) to work against.
+    let v30_bridgehub = contracts.ecosystem_contracts.bridgehub_proxy_addr.clone();
+    let v30_asset_router = read_address_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        &v30_bridgehub,
+        "assetRouter()(address)",
+    )?;
+    let erc20_addr =
+        deploy_test_erc20(&contracts_backend, l1_rpc_url, DEFAULT_ANVIL_PRIVATE_KEY)?;
+    println!("✓ Test ERC20 deployed at {erc20_addr}");
+    let pre_deposit_amount = alloy::primitives::U256::from(1_000_000_000_000_000_000u128); // 1 token (18 decimals)
+    integration_tests::l1_l2_deposit::mint_erc20(
+        l1_rpc_url,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        &test_address,
+        pre_deposit_amount * alloy::primitives::U256::from(10),
+    )
+    .await
+    .context("pre-upgrade ERC20 mint")?;
+    integration_tests::l1_l2_deposit::approve_erc20(
+        l1_rpc_url,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        &v30_asset_router,
+        alloy::primitives::U256::MAX,
+    )
+    .await
+    .context("pre-upgrade ERC20 approve")?;
+    let pre_l2_hash = integration_tests::l1_l2_deposit::submit_l1_to_l2_erc20_deposit(
+        l1_rpc_url,
+        &v30_bridgehub,
+        6565,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        pre_deposit_amount,
+        &test_address,
+    )
+    .await
+    .context("pre-upgrade ERC20 deposit (registers in NTV)")?;
+    integration_tests::l1_l2_deposit::wait_for_l2_priority_tx_receipt(
+        &server.rpc_url(),
+        pre_l2_hash,
+        Duration::from_secs(60),
+    )
+    .await
+    .context("pre-upgrade ERC20 deposit L2 receipt")?;
+    println!("✓ Pre-upgrade ERC20 deposit landed (token now in NTV registry)");
+
     // Synthesize a minimal ecosystem.yaml from contracts.yaml for
     // protocol-ops (which takes --ecosystem <path>). Write it into the
     // backend's work_dir so it's visible inside the Docker container
@@ -995,6 +1162,214 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
     // Run ecosystem upgrade stages via direct protocol-ops.
     let _script_output =
         run_ecosystem_upgrades(&contracts_backend, l1_rpc_url, &contracts, &wallets).await?;
+
+    // Experiment: try an L1→L2 deposit in the window AFTER the CTM has been
+    // upgraded but BEFORE the chain itself has been upgraded. We assert the
+    // expected outcomes (A reverts, B/D succeed, C reverts) so a regression
+    // in the gating shows up as a hard test failure rather than just a
+    // surprising log line.
+    println!("\n=== Experiment: deposit between CTM-upgrade and chain-upgrade ===");
+    println!("\n  Experiment A: ETH deposit BEFORE registerLegacyToken (expect L1 revert)");
+    let a_res = server
+        .fund_account_via_l1_deposit(&test_address, 0.5, L1DepositBaseToken::Eth)
+        .await;
+    anyhow::ensure!(
+        a_res.is_err(),
+        "Experiment A regressed: ETH deposit succeeded in the CTM-upgraded / chain-not-yet-upgraded \
+         window without calling registerLegacyToken. Expected revert from L1AssetTracker._requireRegistered."
+    );
+    println!("  Experiment A: deposit reverted as expected ({})", a_res.unwrap_err());
+
+    // Experiment B: manually register the chain's base-token assetId in the
+    // freshly-deployed L1AssetTracker (post-CTM-upgrade), then retry the
+    // deposit. `registerLegacyToken(bytes32)` is `public` (no access
+    // control) and is the v31 backfill path for assets that lived in NTV at
+    // v30. `stage3` only iterates `ntv.bridgedTokens()` and so doesn't cover
+    // L1-native base tokens like ETH on chain 6565 — we call directly here.
+    println!("\n  Resolving AssetTracker / base-token assetId for chain 6565");
+    let bridgehub_addr = contracts.ecosystem_contracts.bridgehub_proxy_addr.as_str();
+    let asset_router_addr =
+        read_address_from_cast_call(&contracts_backend, l1_rpc_url, bridgehub_addr, "assetRouter()(address)")?;
+    let ntv_addr = read_address_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        &asset_router_addr,
+        "nativeTokenVault()(address)",
+    )?;
+    let asset_tracker_addr = read_address_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        &ntv_addr,
+        "l1AssetTracker()(address)",
+    )?;
+    let base_token_asset_id = read_bytes32_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        bridgehub_addr,
+        "baseTokenAssetId(uint256)(bytes32)",
+        &["6565"],
+    )?;
+    println!("    AssetRouter:  {asset_router_addr}");
+    println!("    NTV:          {ntv_addr}");
+    println!("    AssetTracker: {asset_tracker_addr}");
+    println!("    baseTokenAssetId(6565): {base_token_asset_id}");
+
+    let deployer_pk = wallets.ecosystem.deployer.private_key.as_str();
+    println!("  Calling L1AssetTracker.registerLegacyToken(baseTokenAssetId)");
+    contracts_backend
+        .cast(&[
+            "send",
+            &asset_tracker_addr,
+            "registerLegacyToken(bytes32)",
+            &base_token_asset_id,
+            "--rpc-url",
+            l1_rpc_url,
+            "--private-key",
+            deployer_pk,
+        ])
+        .context("registerLegacyToken(baseTokenAssetId) reverted")?;
+    println!("    registerLegacyToken(baseToken): OK");
+
+    println!("\n  Experiment B: ETH deposit AFTER registerLegacyToken (expect L1+L2 success)");
+    server
+        .fund_account_via_l1_deposit(&test_address, 0.5, L1DepositBaseToken::Eth)
+        .await
+        .context(
+            "Experiment B regressed: ETH deposit failed in the CTM-upgraded / chain-not-yet-upgraded \
+             window after registerLegacyToken — gating should be open at this point.",
+        )?;
+    println!("  Experiment B: deposit succeeded as expected");
+
+    // Experiments C/D: same A/B pattern but for an ERC20 (non-base) deposit.
+    // The ERC20 was deployed pre-upgrade and deposited once to chain 6565, so
+    // it lives in NTV's v30 registry but not in the v31 AssetTracker yet.
+    println!("\n=== ERC20 deposit experiments ===");
+    let erc20_asset_id = read_bytes32_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        &ntv_addr,
+        "assetId(address)(bytes32)",
+        &[&erc20_addr],
+    )?;
+    println!("    NTV.assetId({erc20_addr}) = {erc20_asset_id}");
+
+    // Re-approve against the (post-CTM) AssetRouter — the upgrade may have
+    // swapped the AssetRouter implementation, but address resolves the same
+    // way; do it for safety.
+    let post_asset_router = read_address_from_cast_call(
+        &contracts_backend,
+        l1_rpc_url,
+        bridgehub_addr,
+        "assetRouter()(address)",
+    )?;
+    integration_tests::l1_l2_deposit::approve_erc20(
+        l1_rpc_url,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        &post_asset_router,
+        alloy::primitives::U256::MAX,
+    )
+    .await
+    .ok();
+
+    dump_asset_accounting(
+        "before C",
+        &contracts_backend,
+        l1_rpc_url,
+        &asset_tracker_addr,
+        &ntv_addr,
+        6565,
+        &erc20_asset_id,
+    );
+
+    println!("\n  Experiment C: ERC20 deposit BEFORE registerLegacyToken (expect L1 revert)");
+    let c_res = integration_tests::l1_l2_deposit::submit_l1_to_l2_erc20_deposit(
+        l1_rpc_url,
+        bridgehub_addr,
+        6565,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        pre_deposit_amount,
+        &test_address,
+    )
+    .await;
+    anyhow::ensure!(
+        c_res.is_err(),
+        "Experiment C regressed: ERC20 deposit succeeded in the CTM-upgraded / chain-not-yet-upgraded \
+         window without calling registerLegacyToken. Expected revert from L1AssetTracker._requireRegistered."
+    );
+    println!("  Experiment C: deposit reverted as expected ({})", c_res.unwrap_err());
+
+    println!("\n  Calling L1AssetTracker.registerLegacyToken(erc20AssetId)");
+    contracts_backend
+        .cast(&[
+            "send",
+            &asset_tracker_addr,
+            "registerLegacyToken(bytes32)",
+            &erc20_asset_id,
+            "--rpc-url",
+            l1_rpc_url,
+            "--private-key",
+            deployer_pk,
+        ])
+        .context("registerLegacyToken(erc20AssetId) reverted")?;
+    println!("    registerLegacyToken(erc20): OK");
+
+    dump_asset_accounting(
+        "after registerLegacyToken, before D",
+        &contracts_backend,
+        l1_rpc_url,
+        &asset_tracker_addr,
+        &ntv_addr,
+        6565,
+        &erc20_asset_id,
+    );
+
+    println!("\n  Experiment D: ERC20 deposit AFTER registerLegacyToken (expect L1+L2 success)");
+    let d_l2_hash = integration_tests::l1_l2_deposit::submit_l1_to_l2_erc20_deposit(
+        l1_rpc_url,
+        bridgehub_addr,
+        6565,
+        DEFAULT_ANVIL_PRIVATE_KEY,
+        &erc20_addr,
+        pre_deposit_amount,
+        &test_address,
+    )
+    .await
+    .context(
+        "Experiment D regressed: L1 ERC20 deposit failed after registerLegacyToken — gating \
+         should be open at this point.",
+    )?;
+    println!("  Experiment D: L1 submission OK; L2 priority tx {d_l2_hash}");
+
+    dump_asset_accounting(
+        "after D L1 submission",
+        &contracts_backend,
+        l1_rpc_url,
+        &asset_tracker_addr,
+        &ntv_addr,
+        6565,
+        &erc20_asset_id,
+    );
+
+    // Wait for Experiment D's L2 priority tx to land. Chain is still on v30
+    // protocol, so the L2 side runs the v30 L2NTV.bridgeMint flow; the deposit
+    // must process BEFORE the L2 protocol upgrade tx (queued later by
+    // `schedule_upgrade_timestamp`) — otherwise the upgrade-reconciliation
+    // formula's preV31TotalSupply snapshot won't include this deposit.
+    integration_tests::l1_l2_deposit::wait_for_l2_priority_tx_receipt(
+        &server.rpc_url(),
+        d_l2_hash,
+        Duration::from_secs(60),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Experiment D regressed: L2 priority tx {d_l2_hash} did not execute successfully on L2 \
+             while chain still on v30 protocol."
+        )
+    })?;
+    println!("  Experiment D: L2 priority tx {d_l2_hash} EXECUTED OK");
 
     // Notify server about the upcoming upgrade. The `wait_for_server_to_process_upgrade`
     // call below (via upgrade-readiness-checker) enforces the stronger invariant we
@@ -1045,6 +1420,16 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
     // Stage 3: NTV → AssetTracker token migration. Broadcasts via deployer key
     // (any funded account works).
     run_stage3_token_migration(&contracts_backend, l1_rpc_url, &contracts, &wallets)?;
+
+    dump_asset_accounting(
+        "after chain upgrade + Stage 3",
+        &contracts_backend,
+        l1_rpc_url,
+        &asset_tracker_addr,
+        &ntv_addr,
+        6565,
+        &erc20_asset_id,
+    );
 
     // Wait for new batches produced under v31.
     server

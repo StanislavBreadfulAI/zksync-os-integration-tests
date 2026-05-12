@@ -16,6 +16,11 @@ use anyhow::{Context, Result};
 pub const REQUIRED_L1_TO_L2_GAS_PER_PUBDATA_BYTE: u64 = 800;
 
 const L2_DEPOSIT_GAS_LIMIT: u64 = 500_000;
+/// Gas limit for L1→L2 ERC20 deposits. A first-ever deposit of a token deploys
+/// the bridged L2 token via NTV.bridgeMint → BridgedTokenFactory.deploy*, which
+/// is dominated by CREATE2 + token-init cost. 500k (the ETH-deposit default) is
+/// not enough — the priority tx runs out of gas on L2.
+const L2_ERC20_DEPOSIT_GAS_LIMIT: u64 = 5_000_000;
 
 alloy::sol! {
     #[allow(missing_docs)]
@@ -62,8 +67,24 @@ alloy::sol! {
             address refundRecipient;
         }
 
+        struct L2TransactionRequestTwoBridgesOuter {
+            uint256 chainId;
+            uint256 mintValue;
+            uint256 l2Value;
+            uint256 l2GasLimit;
+            uint256 l2GasPerPubdataByteLimit;
+            address refundRecipient;
+            address secondBridgeAddress;
+            uint256 secondBridgeValue;
+            bytes secondBridgeCalldata;
+        }
+
         function requestL2TransactionDirect(
             L2TransactionRequestDirect calldata _request
+        ) external payable returns (bytes32 canonicalTxHash);
+
+        function requestL2TransactionTwoBridges(
+            L2TransactionRequestTwoBridgesOuter calldata _request
         ) external payable returns (bytes32 canonicalTxHash);
 
         function l2TransactionBaseCost(
@@ -72,6 +93,15 @@ alloy::sol! {
             uint256 _l2GasLimit,
             uint256 _l2GasPerPubdataByteLimit
         ) external view returns (uint256);
+
+        function assetRouter() external view returns (address);
+    }
+
+    #[sol(rpc)]
+    interface IERC20Mintable {
+        function mint(address to, uint256 amount) external;
+        function approve(address spender, uint256 value) external returns (bool);
+        function balanceOf(address account) external view returns (uint256);
     }
 }
 
@@ -286,4 +316,185 @@ pub async fn wait_for_l2_priority_tx_receipt(
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// Mint `amount` of the ERC20 at `token_addr` to `to`. Caller key must be a
+/// minter (TestnetERC20Token has unrestricted `mint`).
+pub async fn mint_erc20(
+    l1_rpc_url: &str,
+    private_key: &str,
+    token_addr: &str,
+    to: &str,
+    amount: U256,
+) -> Result<()> {
+    let token: Address = token_addr.parse().context("parse token address")?;
+    let to_addr: Address = to.parse().context("parse recipient address")?;
+    let wallet = EthereumWallet::new(
+        LocalSigner::from_str(private_key).context("invalid private key for mint_erc20")?,
+    );
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_builtin(l1_rpc_url)
+        .await
+        .context("connect L1 RPC")?;
+    let erc20 = IERC20Mintable::new(token, provider);
+    let receipt = erc20
+        .mint(to_addr, amount)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("ERC20.mint send: {e}"))?
+        .get_receipt()
+        .await
+        .map_err(|e| anyhow::anyhow!("ERC20.mint receipt: {e}"))?;
+    anyhow::ensure!(receipt.status(), "ERC20.mint reverted");
+    Ok(())
+}
+
+/// Approve `spender` for `amount` units of the ERC20 at `token_addr`.
+pub async fn approve_erc20(
+    l1_rpc_url: &str,
+    private_key: &str,
+    token_addr: &str,
+    spender: &str,
+    amount: U256,
+) -> Result<()> {
+    let token: Address = token_addr.parse().context("parse token address")?;
+    let spender_addr: Address = spender.parse().context("parse spender address")?;
+    let wallet = EthereumWallet::new(
+        LocalSigner::from_str(private_key).context("invalid private key for approve_erc20")?,
+    );
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_builtin(l1_rpc_url)
+        .await
+        .context("connect L1 RPC")?;
+    let erc20 = IERC20Mintable::new(token, provider);
+    let receipt = erc20
+        .approve(spender_addr, amount)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("ERC20.approve send: {e}"))?
+        .get_receipt()
+        .await
+        .map_err(|e| anyhow::anyhow!("ERC20.approve receipt: {e}"))?;
+    anyhow::ensure!(receipt.status(), "ERC20.approve reverted");
+    Ok(())
+}
+
+/// Submit an L1→L2 ERC20 (non-base-token) deposit via Bridgehub
+/// `requestL2TransactionTwoBridges`.
+///
+/// Assumes the chain's base token is ETH (msg.value carries `mintValue`). The
+/// L1 signer must have already approved the L1AssetRouter for `deposit_amount`
+/// of the ERC20.
+///
+/// Returns the predicted L2 priority-tx hash.
+pub async fn submit_l1_to_l2_erc20_deposit(
+    l1_rpc_url: &str,
+    bridgehub_addr: &str,
+    chain_id: u64,
+    private_key: &str,
+    l1_token: &str,
+    deposit_amount: U256,
+    l2_recipient: &str,
+) -> Result<FixedBytes<32>> {
+    let submit_start = Instant::now();
+    let bridgehub: Address = bridgehub_addr.parse().context("parse bridgehub address")?;
+    let l1_token_addr: Address = l1_token.parse().context("parse l1_token address")?;
+    let l2_recipient_addr: Address = l2_recipient.parse().context("parse l2_recipient address")?;
+
+    let wallet = EthereumWallet::new(
+        LocalSigner::from_str(private_key).context("invalid private key for erc20 deposit")?,
+    );
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet.clone())
+        .on_builtin(l1_rpc_url)
+        .await
+        .context("connect L1 RPC")?;
+
+    let bridgehub_contract = IBridgehub::new(bridgehub, provider.clone());
+
+    let asset_router = bridgehub_contract
+        .assetRouter()
+        .call()
+        .await
+        .map_err(|e| anyhow::anyhow!("Bridgehub.assetRouter: {e}"))?
+        ._0;
+
+    let max_priority_fee_per_gas = provider
+        .get_max_priority_fee_per_gas()
+        .await
+        .map_err(|e| anyhow::anyhow!("eth_maxPriorityFeePerGas: {e}"))?;
+    let base_fees = provider
+        .estimate_eip1559_fees(Some(deposit_eip1559_estimator))
+        .await
+        .map_err(|e| anyhow::anyhow!("estimate_eip1559_fees: {e}"))?;
+    let max_fee_per_gas = base_fees.max_fee_per_gas + max_priority_fee_per_gas;
+    let tx_base_cost = bridgehub_contract
+        .l2TransactionBaseCost(
+            U256::from(chain_id),
+            U256::from(max_fee_per_gas + max_priority_fee_per_gas),
+            U256::from(L2_ERC20_DEPOSIT_GAS_LIMIT),
+            U256::from(REQUIRED_L1_TO_L2_GAS_PER_PUBDATA_BYTE),
+        )
+        .call()
+        .await
+        .map_err(|e| anyhow::anyhow!("Bridgehub.l2TransactionBaseCost: {e}"))?
+        ._0;
+
+    // Legacy encoding: abi.encode(address l1Token, uint256 amount, address l2Receiver).
+    // First byte of an abi-encoded address is naturally 0x00, which matches
+    // LEGACY_ENCODING_VERSION on L1AssetRouter.
+    let second_bridge_calldata = alloy::sol_types::SolValue::abi_encode(&(
+        l1_token_addr,
+        deposit_amount,
+        l2_recipient_addr,
+    ));
+
+    let sender = wallet.default_signer().address();
+    let request = IBridgehub::L2TransactionRequestTwoBridgesOuter {
+        chainId: U256::from(chain_id),
+        mintValue: tx_base_cost,
+        l2Value: U256::ZERO,
+        l2GasLimit: U256::from(L2_ERC20_DEPOSIT_GAS_LIMIT),
+        l2GasPerPubdataByteLimit: U256::from(REQUIRED_L1_TO_L2_GAS_PER_PUBDATA_BYTE),
+        refundRecipient: l2_recipient_addr,
+        secondBridgeAddress: asset_router,
+        secondBridgeValue: U256::ZERO,
+        secondBridgeCalldata: second_bridge_calldata.into(),
+    };
+
+    let receipt = bridgehub_contract
+        .requestL2TransactionTwoBridges(request)
+        .value(tx_base_cost)
+        .max_fee_per_gas(max_fee_per_gas)
+        .max_priority_fee_per_gas(max_priority_fee_per_gas)
+        .from(sender)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("send L1 Bridgehub two-bridges deposit tx: {e}"))?
+        .get_receipt()
+        .await
+        .map_err(|e| anyhow::anyhow!("get L1 two-bridges deposit receipt: {e}"))?;
+    anyhow::ensure!(
+        receipt.status(),
+        "L1 two-bridges deposit transaction reverted"
+    );
+
+    let l1_to_l2_log = receipt
+        .inner
+        .logs()
+        .iter()
+        .filter_map(|log| log.log_decode::<IMailbox::NewPriorityRequest>().ok())
+        .next()
+        .context("no L1→L2 NewPriorityRequest log from two-bridges deposit tx")?;
+    let l2_tx_hash = l1_to_l2_log.inner.txHash;
+    println!(
+        "  L1→L2 ERC20 deposit: submitted on L1 in {:.2}s, L2 priority tx {l2_tx_hash}",
+        submit_start.elapsed().as_secs_f64()
+    );
+    Ok(l2_tx_hash)
 }
