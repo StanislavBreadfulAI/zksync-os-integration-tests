@@ -93,6 +93,48 @@ async fn fetch_priority_op_l2_hash(
     Ok(FixedBytes::<32>::from_slice(&data[32..64]))
 }
 
+async fn get_last_settlement_change_block(chain_rpc_url: &str) -> Result<Option<u64>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "zks_lastSettlementChangeBlock",
+        "params": [],
+    });
+    let json: serde_json::Value = reqwest::Client::new()
+        .post(chain_rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST zks_lastSettlementChangeBlock to {chain_rpc_url}"))?
+        .json()
+        .await
+        .context("zks_lastSettlementChangeBlock response was not JSON")?;
+
+    if let Some(error) = json.get("error") {
+        anyhow::bail!("zks_lastSettlementChangeBlock RPC error: {error}");
+    }
+
+    match json.get("result").unwrap_or(&serde_json::Value::Null) {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(number) => Ok(Some(number.as_u64().ok_or_else(|| {
+            anyhow::anyhow!("zks_lastSettlementChangeBlock returned non-u64 number: {number}")
+        })?)),
+        serde_json::Value::String(raw) => {
+            let value = if let Some(hex) = raw.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16)
+                    .with_context(|| format!("parse hex settlement-change block {raw}"))?
+            } else {
+                raw.parse::<u64>()
+                    .with_context(|| format!("parse decimal settlement-change block {raw}"))?
+            };
+            Ok(Some(value))
+        }
+        other => anyhow::bail!(
+            "zks_lastSettlementChangeBlock returned unsupported result shape: {other}"
+        ),
+    }
+}
+
 async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     integration_tests::server::get_or_create_run_id("migrate_live_chain_from_gateway");
     let preset = load_current_preset()?;
@@ -120,7 +162,7 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
 
     // Resolve the chain's diamond proxy from L1 and snapshot the DA validator
     // The gateway-settling chain's L1 DA validator pair is zeroed (it settled
-    // on gateway, not L1). To find the correct L1 DA validator for phase 3
+    // on gateway, not L1). To find the correct L1 DA validator for phase 4
     // (set-da-validator-pair after migrating back to L1), read it from an
     // L1-settling chain that still has its pair intact.
     let l1_provider = ProviderBuilder::new()
@@ -166,6 +208,7 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     .spawn(&anvil)
     .map_err(|e| anyhow::anyhow!("Failed to start gateway: {:?}", e))?;
     let gw_l2_rpc = gw_server.rpc_url();
+    let gw_l2_rpc_for_protocol_ops = gw_server.rpc_url_for(&preset.era_contracts);
     println!("Gateway ready at {gw_l2_rpc}");
 
     println!(
@@ -177,6 +220,8 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         .config_path(&chain_config)
         .spawn(&anvil)
         .map_err(|e| anyhow::anyhow!("Failed to start chain server: {:?}", e))?;
+    let chain_l2_rpc = chain_server.rpc_url();
+    let chain_l2_rpc_for_protocol_ops = chain_server.rpc_url_for(&preset.era_contracts);
 
     // Sanity check: the fixture must actually be settling on the gateway
     // before we try to migrate it back.
@@ -187,6 +232,13 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     chain_server
         .wait_for_traffic_tx_executed_on_l1()
         .context("gateway-settling chain batches (pre-migration)")?;
+    let previous_settlement_change_block = get_last_settlement_change_block(&chain_l2_rpc)
+        .await
+        .context("read pre-phase-0 settlement-change block")?;
+    println!(
+        "Pre-phase-0 zks_lastSettlementChangeBlock: {:?}",
+        previous_settlement_change_block
+    );
 
     let eco_dir = integration_tests::l1_state::resolve_ecosystem_dir(&preset)?;
     let contracts_backend =
@@ -314,95 +366,50 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         .apply(signers)
         .context("apply migrate-from phase 0 bundles")?;
 
-    println!("  Waiting for gateway to process pause-deposits...");
-    gw_server
-        .wait_for_traffic_tx_executed_on_l1()
-        .context("gateway batches after pause-deposits")?;
-
-    // Phase 0's L1 `pauseDepositsBeforeInitiatingMigration` only sets
-    // `pausedDepositsTimestamp` on the *L1* chain diamond. For a
-    // gateway-settling chain it also enqueues a cross-chain priority tx
-    // (`L2ChainAssetHandler.requestPauseDepositsForChainOnGateway`) on the
-    // gateway's L1 diamond; when that executes on gateway L2, the chain's
-    // gateway-side diamond sets its own `pausedDepositsTimestamp`. Phase 1's
-    // migration tx checks the *gateway-side* timestamp, so we must wait for
-    // the cross-chain pause to actually propagate before proceeding.
+    // Phase 1 is the migration-readiness precondition. The server reports
+    // the L2 block containing the settlement-layer change boundary; protocol
+    // ops maps that block to a batch and waits until the old settlement layer
+    // (Gateway) has executed everything up to that boundary before phase 2
+    // submits `startMigrateChainFromGateway`.
     //
-    // Poll the chain's gateway-side diamond storage slot 62
-    // (`ZKChainStorage.pausedDepositsTimestamp`, see ZKChainStorage.sol) via
-    // the gateway L2 RPC until it's non-zero.
-    println!("  Waiting for pause-deposits to propagate to gateway chain diamond...");
-    let gw_l2_bridgehub_sys: Address = "0x0000000000000000000000000000000000010002"
-        .parse()
-        .context("parse gateway L2 bridgehub")?;
-    let gw_l2_provider = ProviderBuilder::new()
-        .on_builtin(gw_l2_rpc.as_str())
-        .await
-        .context("connect gateway L2 provider")?;
-    let gw_bh = IBridgehub::new(gw_l2_bridgehub_sys, &gw_l2_provider);
-    let gw_side_chain_diamond = gw_bh
-        .getZKChain(U256::from(chain_id))
-        .call()
-        .await
-        .context("gateway L2 bridgehub.getZKChain(chain)")?
-        ._0;
-    anyhow::ensure!(
-        gw_side_chain_diamond != Address::ZERO,
-        "Gateway L2 bridgehub has no ZKChain diamond for chain {} — fixture is broken",
-        chain_id,
-    );
-    {
-        use alloy::primitives::B256;
-        // Slot 62, not 64: `ZKChainStorage` packs zksyncOS (bool) +
-        // l2DACommitmentScheme (enum) + assetTracker (address) into slot 60,
-        // putting nativeTokenVault at 61 and pausedDepositsTimestamp at 62.
-        // The `@dev STORAGE SLOT` comments in ZKChainStorage.sol don't
-        // account for this packing (verified via
-        // `forge inspect MigratorFacet storageLayout`).
-        let slot = U256::from(62);
-        let start = std::time::Instant::now();
-        let deadline = Duration::from_secs(20);
-        loop {
-            let raw: B256 = gw_l2_provider
-                .get_storage_at(gw_side_chain_diamond, slot)
-                .await
-                .context("eth_getStorageAt on gateway chain diamond slot 64")?
-                .into();
-            let ts = U256::from_be_bytes(raw.0);
-            if !ts.is_zero() {
-                println!("  Gateway chain diamond pausedDepositsTimestamp = {ts}");
-                break;
-            }
-            if start.elapsed() >= deadline {
-                anyhow::bail!(
-                    "pausedDepositsTimestamp on gateway chain diamond {gw_side_chain_diamond} \
-                     stayed 0 after {:.1}s — pause-deposits cross-chain tx didn't propagate",
-                    start.elapsed().as_secs_f64(),
-                );
-            }
-            // Drive the gateway a bit — send one L2 traffic tx and wait
-            // for its batch to finalize, so the gateway advances its
-            // priority-queue processing.
-            let _ = gw_server
-                .wait_for_traffic_tx_executed_on_l1()
-                .context("drive gateway while waiting for pause propagation")?;
-        }
+    // The test does not drive extra Gateway traffic here; it should cover the
+    // protocol-ops wait instead of relying on incidental test-side draining.
+    println!("  Waiting for server migration boundary to drain on gateway...");
+    let previous_settlement_change_block_arg =
+        previous_settlement_change_block.map(|block| block.to_string());
+    let mut phase1_wait_args = vec![
+        "chain",
+        "gateway",
+        "migrate-from",
+        "phase-1-wait-ready",
+        "--chain-id",
+        &chain_id_str,
+        "--chain-rpc-url",
+        chain_l2_rpc_for_protocol_ops.as_str(),
+        "--gateway-rpc-url",
+        gw_l2_rpc_for_protocol_ops.as_str(),
+    ];
+    if let Some(previous_block) = previous_settlement_change_block_arg.as_deref() {
+        phase1_wait_args.extend_from_slice(&["--previous-settlement-change-block", previous_block]);
     }
+    contracts_backend
+        .protocol_ops(&phase1_wait_args)
+        .context("migrate-from phase 1 (wait for server readiness)")?;
 
-    // ── Phase 1: submit (chain admin) ────────────────────────────────────
+    // ── Phase 2: submit (chain admin) ────────────────────────────────────
     //
     // Anvil state dumps drop historical events, so the CTM-event fallback
-    // inside `phase-1-submit` can't find `NewUpgradeCutData`. Pass the
+    // inside `phase-2-submit` can't find `NewUpgradeCutData`. Pass the
     // cached diamond cut data explicitly via `--l1-diamond-cut-data` (real
     // chains auto-resolve).
-    let phase1_safe_rel = format!("{migrate_dir}/phase1/safe");
-    let phase1_safe_abs = contracts_backend.work_path(&phase1_safe_rel);
+    let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
+    let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-from",
-            "phase-1-submit",
+            "phase-2-submit",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -416,13 +423,13 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
             "--refund-recipient",
             &deployer_addr,
             "--out",
-            &phase1_safe_abs,
+            &phase2_safe_abs,
         ])
-        .context("migrate-from phase 1 (submit)")?;
+        .context("migrate-from phase 2 (submit)")?;
     contracts_backend
-        .parse_safe_bundles(&phase1_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase2_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-from phase 1 bundles")?;
+        .context("apply migrate-from phase 2 bundles")?;
 
     // Extract the L2 priority tx hash from the NewPriorityRequest event on
     // L1. `.apply()` above emitted it on the gateway diamond proxy. Scan
@@ -434,15 +441,15 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     let l2_priority_tx_hex = format!("{l2_priority_tx_hash:#x}");
     println!("  L2 priority tx hash (on gateway): {l2_priority_tx_hex}");
 
-    // ── Phase 2: finalize (deployer) ─────────────────────────────────────
-    let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
-    let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
+    // ── Phase 3: finalize (deployer) ─────────────────────────────────────
+    let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
+    let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-from",
-            "phase-2-finalize",
+            "phase-3-finalize",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -452,27 +459,27 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
             "--deployer-address",
             &deployer_addr,
             "--gateway-rpc-url",
-            gw_l2_rpc.as_str(),
+            gw_l2_rpc_for_protocol_ops.as_str(),
             "--migration-l2-tx-hash",
             l2_priority_tx_hex.as_str(),
             "--out",
-            &phase2_safe_abs,
+            &phase3_safe_abs,
         ])
-        .context("migrate-from phase 2 (finalize)")?;
+        .context("migrate-from phase 3 (finalize)")?;
     contracts_backend
-        .parse_safe_bundles(&phase2_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase3_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-from phase 2 bundles")?;
+        .context("apply migrate-from phase 3 bundles")?;
 
-    // ── Phase 3: set-da-validator-pair (chain admin) ─────────────────────
-    let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
-    let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
+    // ── Phase 4: set-da-validator-pair (chain admin) ─────────────────────
+    let phase4_safe_rel = format!("{migrate_dir}/phase4/safe");
+    let phase4_safe_abs = contracts_backend.work_path(&phase4_safe_rel);
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-from",
-            "phase-3-set-da-validator-pair",
+            "phase-4-set-da-validator-pair",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -484,13 +491,13 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
             "--l2-da-commitment-scheme",
             "blobs-zk-sync-os",
             "--out",
-            &phase3_safe_abs,
+            &phase4_safe_abs,
         ])
-        .context("migrate-from phase 3 (set-da-validator-pair)")?;
+        .context("migrate-from phase 4 (set-da-validator-pair)")?;
     contracts_backend
-        .parse_safe_bundles(&phase3_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase4_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-from phase 3 bundles")?;
+        .context("apply migrate-from phase 4 bundles")?;
 
     // ── Verify: settlementLayer flipped back to L1 ────────────────────────
     let bridgehub_contract = IBridgehub::new(bridgehub, &l1_provider);
