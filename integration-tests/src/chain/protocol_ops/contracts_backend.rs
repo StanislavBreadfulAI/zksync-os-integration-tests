@@ -626,7 +626,7 @@ impl EraContractsBackend {
     /// Parse the `manifest.json` at `safe_dir_relative` (inside the work
     /// dir) and wrap the listed bundles as a [`SafeBundles`] handle. Use
     /// after any protocol-ops command that emits a manifest (e.g.
-    /// `chain gateway migrate-to phase-1-submit`,
+    /// `chain gateway migrate-to phase-2-submit`,
     /// `chain gateway convert`).
     pub fn parse_safe_bundles<'a>(
         &'a self,

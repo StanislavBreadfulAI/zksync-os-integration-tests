@@ -1,24 +1,26 @@
 //! Live migration of an L1-settling chain to gateway, end-to-end.
 //!
 //! Companion to `migrate_live_chain_from_gateway_test.rs`. Picks the single L1-settling
-//! chain out of the cached ecosystem, drives the three migrate-to-gateway
-//! phases against a live server, and verifies that the bridgehub
+//! chain out of the cached ecosystem, drives the migrate-to-gateway
+//! phase sequence against a live server, and verifies that the bridgehub
 //! `settlementLayer` flips to the gateway chain id.
 //!
 //!   1. Spawns the gateway server and the L1-settling chain server.
 //!   2. Waits for the chain to produce + execute a few batches on L1, so we
 //!      know the starting fixture is healthy.
 //!   3. Runs the `chain gateway migrate` sequence:
-//!        - phase 1 (chain owner + deployer): notify-server + submit
-//!        - phase 2 (deployer): finalize (polls gateway for withdrawal proof)
-//!        - phase 3 (chain owner + deployer): enable-validators +
+//!        - phase 0 (chain owner): pause-deposits + notify-server
+//!        - phase 1: wait for the server migration boundary to drain on L1
+//!        - phase 2 (chain owner + deployer): submit
+//!        - phase 3 (deployer): finalize (polls gateway for withdrawal proof)
+//!        - phase 4 (chain owner + deployer): enable-validators +
 //!          set-da-validator-pair
 //!   4. Verifies on the L1 bridgehub that the chain's settlementLayer has
 //!      flipped to the gateway chain id.
 //!
-//! The chain server that was running pre-migration panics once phase 1
+//! The chain server that was running pre-migration panics once phase 2
 //! flips the settlement layer: its L1 committer keeps trying to commit new
-//! batches to L1 and those txs start reverting. After phase 3, we kill the
+//! batches to L1 and those txs start reverting. After phase 4, we kill the
 //! crashed server and respawn a fresh one for the same chain — reusing its
 //! on-disk RocksDB but this time configured with `gateway_rpc_url` — then
 //! drive traffic and wait for batches to execute against the chain's *new*
@@ -134,6 +136,7 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
     .spawn(&anvil)
     .map_err(|e| anyhow::anyhow!("Failed to start gateway: {:?}", e))?;
     let gw_l2_rpc = gw_server.rpc_url();
+    let gw_l2_rpc_for_protocol_ops = gw_server.rpc_url_for(&preset.era_contracts);
     println!("Gateway ready at {gw_l2_rpc}");
 
     println!(
@@ -144,6 +147,7 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
         .config_path(&chain_config)
         .spawn(&anvil)
         .map_err(|e| anyhow::anyhow!("Failed to start chain server: {:?}", e))?;
+    let chain_l2_rpc_for_protocol_ops = chain_server.rpc_url_for(&preset.era_contracts);
 
     println!(
         "\n=== Sanity: wait for L1-settled batches on chain {} ===",
@@ -179,14 +183,6 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
         .on_builtin(&l1_rpc_url)
         .await
         .context("connect L1 provider")?;
-    let bh = IBridgehub::new(bridgehub_addr, &l1_provider);
-    let chain_diamond_proxy = bh
-        .getZKChain(U256::from(chain_id))
-        .call()
-        .await
-        .context("bridgehub.getZKChain")?
-        ._0;
-    let chain_diamond_proxy_hex = format!("{:#x}", chain_diamond_proxy);
     let chain_id_str = chain_id.to_string();
 
     // ── Phase 0: pause-deposits + notify-server (chain admin) ────────────
@@ -219,35 +215,38 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
         .apply(signers)
         .context("apply migrate-to-gateway phase 0 bundles")?;
 
-    // Wait for the chain to drain its commit/execute pipeline after
-    // notify-server so the Migrator's `NotAllBatchesExecuted()` check
-    // passes when phase 1 submits. We require stability for several
-    // seconds because `committed == executed` can briefly be true just
-    // before the server seals its final (SetSLChainId) batch on L1.
-    println!("  Waiting for L1-settling chain to drain commit/execute pipeline...");
-    integration_tests::server_utils::wait_for_committed_eq_executed(
-        &l1_rpc_url,
-        &chain_diamond_proxy_hex,
-        Duration::from_secs(10),
-        integration_tests::DEFAULT_WAIT_TIMEOUT,
-    )
-    .context("wait for chain batches to drain before submit")?;
-
-    // ── Phase 1: notify-server + submit (chain admin) ────────────────────
+    // Phase 1 is the migration-readiness precondition. The server reports
+    // the L2 block containing the settlement-layer change boundary; protocol
+    // ops waits until the chain server reports the immediately preceding
+    // block as finalized on L1 before phase 2 submits `migrateChainToGateway`.
     //
-    // `protocol-ops chain gateway migrate-to phase-1-submit` — one
-    // invocation runs both stages against a single anvil fork and emits
-    // one Safe bundle dir.
+    // The test does not drive extra chain traffic here; it should cover the
+    // protocol-ops wait instead of relying on incidental test-side draining.
+    println!("  Waiting for server migration boundary to drain on L1...");
+    contracts_backend
+        .protocol_ops(&[
+            "chain",
+            "gateway",
+            "migrate-to",
+            "phase-1-wait-ready",
+            "--chain-id",
+            &chain_id_str,
+            "--chain-rpc-url",
+            chain_l2_rpc_for_protocol_ops.as_str(),
+        ])
+        .context("migrate-to-gateway phase 1 (wait for server readiness)")?;
+
+    // ── Phase 2: submit (chain admin) ────────────────────────────────────
     let deployer_addr = wallets.ecosystem.deployer.address.clone();
-    let phase1_safe_rel = format!("{migrate_dir}/phase1/safe");
-    let phase1_safe_abs = contracts_backend.work_path(&phase1_safe_rel);
+    let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
+    let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
     let gateway_chain_id_str = eco.gateway_chain_id().to_string();
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-to",
-            "phase-1-submit",
+            "phase-2-submit",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -257,36 +256,29 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             "--gateway-chain-id",
             &gateway_chain_id_str,
             "--gateway-rpc-url",
-            gw_l2_rpc.as_str(),
+            gw_l2_rpc_for_protocol_ops.as_str(),
             "--l1-gas-price",
             l1_gas_price.as_str(),
             "--refund-recipient",
             &deployer_addr,
             "--out",
-            &phase1_safe_abs,
+            &phase2_safe_abs,
         ])
-        .context("migrate-to-gateway phase 1 (submit)")?;
+        .context("migrate-to-gateway phase 2 (submit)")?;
     contracts_backend
-        .parse_safe_bundles(&phase1_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase2_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-to-gateway phase 1 bundles")?;
+        .context("apply migrate-to-gateway phase 2 bundles")?;
 
-    // Let the gateway pick up and execute the migration priority tx so that
-    // phase 2 (finalize) can poll a settled withdrawal proof.
-    println!("  Waiting for gateway to process migrate priority tx...");
-    gw_server
-        .wait_for_traffic_tx_executed_on_l1()
-        .context("gateway batches after phase 1")?;
-
-    // ── Phase 2: finalize (deployer) ────────────────────────────────────
-    let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
-    let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
+    // ── Phase 3: finalize (deployer) ────────────────────────────────────
+    let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
+    let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-to",
-            "phase-2-finalize",
+            "phase-3-finalize",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -296,25 +288,25 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             "--deployer-address",
             &deployer_addr,
             "--gateway-rpc-url",
-            gw_l2_rpc.as_str(),
+            gw_l2_rpc_for_protocol_ops.as_str(),
             "--out",
-            &phase2_safe_abs,
+            &phase3_safe_abs,
         ])
-        .context("migrate-to-gateway phase 2 (finalize)")?;
+        .context("migrate-to-gateway phase 3 (finalize)")?;
     contracts_backend
-        .parse_safe_bundles(&phase2_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase3_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-to-gateway phase 2 bundles")?;
+        .context("apply migrate-to-gateway phase 3 bundles")?;
 
-    // ── Phase 3: enable-validators + set-da-validator-pair (chain admin) ─
-    let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
-    let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
+    // ── Phase 4: enable-validators + set-da-validator-pair (chain admin) ─
+    let phase4_safe_rel = format!("{migrate_dir}/phase4/safe");
+    let phase4_safe_abs = contracts_backend.work_path(&phase4_safe_rel);
     contracts_backend
         .protocol_ops(&[
             "chain",
             "gateway",
             "migrate-to",
-            "phase-3-validators",
+            "phase-4-validators",
             "--l1-rpc-url",
             &l1_rpc_url,
             "--bridgehub",
@@ -322,7 +314,7 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             "--chain-id",
             &chain_id_str,
             "--gateway-rpc-url",
-            gw_l2_rpc.as_str(),
+            gw_l2_rpc_for_protocol_ops.as_str(),
             "--commit-operator",
             commit_op_addr.as_str(),
             "--prove-operator",
@@ -336,13 +328,13 @@ async fn run_migrate_live_chain_to_gateway_test() -> Result<()> {
             "--l1-gas-price",
             l1_gas_price.as_str(),
             "--out",
-            &phase3_safe_abs,
+            &phase4_safe_abs,
         ])
-        .context("migrate-to-gateway phase 3 (validators)")?;
+        .context("migrate-to-gateway phase 4 (validators)")?;
     contracts_backend
-        .parse_safe_bundles(&phase3_safe_rel, &l1_rpc_url)?
+        .parse_safe_bundles(&phase4_safe_rel, &l1_rpc_url)?
         .apply(signers)
-        .context("apply migrate-to-gateway phase 3 bundles")?;
+        .context("apply migrate-to-gateway phase 4 bundles")?;
 
     // ── Verify: settlementLayer flipped to gateway ───────────────────────
     let bridgehub_contract = IBridgehub::new(bridgehub_addr, &l1_provider);

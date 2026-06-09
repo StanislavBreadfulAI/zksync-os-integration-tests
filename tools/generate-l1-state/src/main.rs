@@ -1089,14 +1089,16 @@ async fn run_generation_flow(
     // ----------------------------------------------------------------
     // Step 13: Gateway-settling chains — migrate, finalize, enable validators
     //
-    // Three `chain gateway migrate-to` phase commands, one per phase:
-    //   phase-1-submit:      notify-server + submit       (chain admin)
-    //   phase-2-finalize:    finalize                     (deployer)
-    //   phase-3-validators:  enable-validators + set-da   (chain admin)
+    // Gateway-settling fixture chains are not live-server migrations. They
+    // are born paused with no batches to drain, so generation skips the live
+    // phase-0 notify and phase-1 server-readiness wait and starts at:
+    //   phase-2-submit:      submit                       (chain admin)
+    //   phase-3-finalize:    finalize                     (deployer)
+    //   phase-4-validators:  enable-validators + set-da   (chain admin)
     //
-    // Phases 1+2 run per-chain (bundle 1 is applied to real L1 before
-    // bundle 2 is simulated — finalize needs the submit priority tx on L1).
-    // Phase 3 runs per-chain after the gateway has stabilised.
+    // Phases 2+3 run per-chain (submit is applied to real L1 before finalize
+    // is simulated — finalize needs the submit priority tx on L1). Phase 4
+    // runs per-chain after the gateway has stabilised.
     // ----------------------------------------------------------------
 
     // Read deployment artifacts from the vote preparation output
@@ -1131,7 +1133,7 @@ async fn run_generation_flow(
         vote_prep_toml_path.display()
     );
 
-    // 13a: Phases 1 + 2 per chain.
+    // 13a: Phases 2 + 3 per chain.
     let gateway_chain_id_str = GATEWAY.id.to_string();
     let l1_gas_price_str = MIGRATE_L1_GAS_PRICE_WEI.to_string();
     for ops in gw_settling_ops {
@@ -1140,16 +1142,16 @@ async fn run_generation_flow(
         let migrate_dir = format!("migrate_{chain_id}");
         let signers: &[&str] = &[&ops.owner_pk, &keys.deployer_pk];
 
-        // Phase 1: notify-server → submit (chain admin), one Safe bundle
-        // emitted directly by `chain gateway migrate-to phase-1-submit`.
-        let phase1_safe_rel = format!("{migrate_dir}/phase1/safe");
-        let phase1_safe_abs = contracts_backend.work_path(&phase1_safe_rel);
+        // Phase 2: submit (chain admin). Fixture chains are not backed by a
+        // live server here, so phase 0/1 are intentionally skipped.
+        let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
+        let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
         let chain_id_str = chain_id.to_string();
         let mut args = vec![
             "chain",
             "gateway",
             "migrate-to",
-            "phase-1-submit",
+            "phase-2-submit",
             "--l1-rpc-url",
             l1_rpc_url,
         ];
@@ -1173,22 +1175,22 @@ async fn run_generation_flow(
             "--refund-recipient",
             &keys.deployer_addr,
             "--out",
-            &phase1_safe_abs,
+            &phase2_safe_abs,
         ]);
         contracts_backend.protocol_ops(&args)?;
         contracts_backend
-            .parse_safe_bundles(&phase1_safe_rel, l1_rpc_url)?
+            .parse_safe_bundles(&phase2_safe_rel, l1_rpc_url)?
             .apply(signers)
-            .context("apply migrate phase 1 bundles")?;
+            .context("apply migrate phase 2 bundles")?;
 
-        // Phase 2: finalize (deployer) — forks real L1 post-phase-1.
-        let phase2_safe_rel = format!("{migrate_dir}/phase2/safe");
-        let phase2_safe_abs = contracts_backend.work_path(&phase2_safe_rel);
+        // Phase 3: finalize (deployer) — forks real L1 post-phase-2.
+        let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
+        let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
         let mut args = vec![
             "chain",
             "gateway",
             "migrate-to",
-            "phase-2-finalize",
+            "phase-3-finalize",
             "--l1-rpc-url",
             l1_rpc_url,
         ];
@@ -1209,12 +1211,12 @@ async fn run_generation_flow(
         if !use_bridgehub_topology {
             args.extend(["--vote-preparation-toml", &vote_output_path_rel]);
         }
-        args.extend(["--out", &phase2_safe_abs]);
+        args.extend(["--out", &phase3_safe_abs]);
         contracts_backend.protocol_ops(&args)?;
         contracts_backend
-            .parse_safe_bundles(&phase2_safe_rel, l1_rpc_url)?
+            .parse_safe_bundles(&phase3_safe_rel, l1_rpc_url)?
             .apply(signers)
-            .context("apply migrate phase 2 bundles")?;
+            .context("apply migrate phase 3 bundles")?;
     }
 
     // 13b: Wait for gateway to process all migration L1->L2 priority txs
@@ -1223,7 +1225,7 @@ async fn run_generation_flow(
         .wait_for_traffic_tx_executed_on_l1()
         .context("gateway batches after migration")?;
 
-    // 13d: Phase 3 per chain — enable validators + set DA validator pairs,
+    // 13d: Phase 4 per chain — enable validators + set DA validator pairs,
     // then fund operators on gateway L2.
     let l1_gas_price_str = MIGRATE_L1_GAS_PRICE_WEI.to_string();
     for ops in gw_settling_ops {
@@ -1234,14 +1236,14 @@ async fn run_generation_flow(
         );
         let migrate_dir = format!("migrate_{chain_id}");
 
-        let phase3_safe_rel = format!("{migrate_dir}/phase3/safe");
-        let phase3_safe_abs = contracts_backend.work_path(&phase3_safe_rel);
+        let phase4_safe_rel = format!("{migrate_dir}/phase4/safe");
+        let phase4_safe_abs = contracts_backend.work_path(&phase4_safe_rel);
         let chain_id_str = chain_id.to_string();
         let mut args = vec![
             "chain",
             "gateway",
             "migrate-to",
-            "phase-3-validators",
+            "phase-4-validators",
             "--l1-rpc-url",
             l1_rpc_url,
         ];
@@ -1269,13 +1271,13 @@ async fn run_generation_flow(
             "--l1-gas-price",
             &l1_gas_price_str,
             "--out",
-            &phase3_safe_abs,
+            &phase4_safe_abs,
         ]);
         contracts_backend.protocol_ops(&args)?;
         contracts_backend
-            .parse_safe_bundles(&phase3_safe_rel, l1_rpc_url)?
+            .parse_safe_bundles(&phase4_safe_rel, l1_rpc_url)?
             .apply(&[&ops.owner_pk, &keys.deployer_pk])
-            .context("apply migrate phase 3 bundles")?;
+            .context("apply migrate phase 4 bundles")?;
 
         println!("  Funding gateway L2 for chain {} operators", chain_id);
         for addr in [&ops.commit_addr, &ops.prove_addr, &ops.execute_addr] {
