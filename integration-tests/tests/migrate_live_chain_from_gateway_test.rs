@@ -368,9 +368,8 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
 
     // Phase 1 is the migration-readiness precondition. The server reports
     // the L2 block containing the settlement-layer change boundary; protocol
-    // ops maps that block to a batch and waits until the old settlement layer
-    // (Gateway) has executed everything up to that boundary before phase 2
-    // submits `startMigrateChainFromGateway`.
+    // ops waits until the chain server reports the immediately preceding
+    // block as finalized on Gateway before phase 2 submits `startMigrateChainFromGateway`.
     //
     // The test does not drive extra Gateway traffic here; it should cover the
     // protocol-ops wait instead of relying on incidental test-side draining.
@@ -386,8 +385,6 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         &chain_id_str,
         "--chain-rpc-url",
         chain_l2_rpc_for_protocol_ops.as_str(),
-        "--gateway-rpc-url",
-        gw_l2_rpc_for_protocol_ops.as_str(),
     ];
     if let Some(previous_block) = previous_settlement_change_block_arg.as_deref() {
         phase1_wait_args.extend_from_slice(&["--previous-settlement-change-block", previous_block]);
