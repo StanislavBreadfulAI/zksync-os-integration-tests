@@ -1,5 +1,5 @@
 v31_draft_with_main_server:
-  era_contracts: b4ff81d100bbdb4d5044edee68cff72694d34147
+  era_contracts: 00aea30488ed586e7065a712d00cc88fb37cbda5
   zksync_os_server: main
   tests:
     - l1_settling_test
@@ -15,7 +15,7 @@ migrate_live_chain_gateway:
     - migrate_live_chain_to_gateway_test
 
 v30_to_v31_upgrade:
-  era_contracts: b4ff81d100bbdb4d5044edee68cff72694d34147
+  era_contracts: 00aea30488ed586e7065a712d00cc88fb37cbda5
   zksync_os_server: main
   tests:
     - upgrade_v30_to_v31
