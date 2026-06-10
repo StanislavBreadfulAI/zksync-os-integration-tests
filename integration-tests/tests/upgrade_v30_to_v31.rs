@@ -473,9 +473,10 @@ async fn run_ecosystem_upgrades(
     // L1_BYTECODES_SUPPLIER(), isZKsyncOS(), or getRollupDAManager().
     // On v31+ ecosystems protocol-ops auto-resolves them from L1.
     let prepare_dir = format!("upgrade_prepare_{run_tag}");
+    let prepare_bundle_dir = format!("{prepare_dir}/prepare");
     let governance_toml_rel = format!("{prepare_dir}/ecosystem.toml");
     let governance_toml_abs = contracts_backend.work_path(&governance_toml_rel);
-    let prepare_out_abs = contracts_backend.work_path(&prepare_dir);
+    let prepare_out_abs = contracts_backend.work_path(&prepare_bundle_dir);
 
     println!("\n  Running ecosystem upgrade-prepare-all ...");
     contracts_backend
@@ -506,7 +507,7 @@ async fn run_ecosystem_upgrades(
 
     println!("  Applying prepare Safe bundles (deployer) ...");
     contracts_backend
-        .parse_safe_bundles(&prepare_dir, l1_rpc_url)?
+        .parse_safe_bundles(&prepare_bundle_dir, l1_rpc_url)?
         .apply(&[deployer_key, governor_key])
         .context("apply ecosystem-upgrade-prepare-all Safe bundles")?;
 
