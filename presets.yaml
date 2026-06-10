@@ -8,7 +8,7 @@ v31_draft_with_main_server:
     - add_remove_validator_test
 
 migrate_live_chain_gateway:
-  era_contracts: 7a14a39161673703a8e019bd0bb994d70a9da60e
+  era_contracts: 00aea30488ed586e7065a712d00cc88fb37cbda5
   zksync_os_server: v0.20.6-last-settlement.1
   tests:
     - migrate_live_chain_from_gateway_test
