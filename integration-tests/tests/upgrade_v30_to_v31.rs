@@ -477,6 +477,7 @@ async fn run_ecosystem_upgrades(
     let governance_toml_rel = format!("{prepare_dir}/ecosystem.toml");
     let governance_toml_abs = contracts_backend.work_path(&governance_toml_rel);
     let prepare_out_abs = contracts_backend.work_path(&prepare_bundle_dir);
+    let upgrade_input_path = "/upgrade-envs/v0.31.0-interopB/foundry-upgrade.toml";
 
     println!("\n  Running ecosystem upgrade-prepare-all ...");
     contracts_backend
@@ -500,6 +501,8 @@ async fn run_ecosystem_upgrades(
             contracts.ecosystem_contracts.l1_rollup_da_manager.as_str(),
             "--is-zk-sync-os",
             "true",
+            "--upgrade-input-path",
+            upgrade_input_path,
             "--out",
             &prepare_out_abs,
         ])
