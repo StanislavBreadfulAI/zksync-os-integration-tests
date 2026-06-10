@@ -93,46 +93,38 @@ async fn fetch_priority_op_l2_hash(
     Ok(FixedBytes::<32>::from_slice(&data[32..64]))
 }
 
-async fn get_last_settlement_change_block(chain_rpc_url: &str) -> Result<Option<u64>> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "zks_lastSettlementChangeBlock",
-        "params": [],
-    });
-    let json: serde_json::Value = reqwest::Client::new()
-        .post(chain_rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("POST zks_lastSettlementChangeBlock to {chain_rpc_url}"))?
-        .json()
-        .await
-        .context("zks_lastSettlementChangeBlock response was not JSON")?;
+fn phase0_previous_settlement_change_block(
+    contracts_backend: &EraContractsBackend,
+    phase0_safe_rel: &str,
+) -> Result<u64> {
+    let manifest_rel = format!("{phase0_safe_rel}/manifest.json");
+    let manifest_body = contracts_backend
+        .read_protocol_ops_output(&manifest_rel)
+        .with_context(|| format!("read phase 0 manifest at {manifest_rel}"))?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_body).context("parse phase 0 manifest JSON")?;
+    let metadata = manifest
+        .get("metadata")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| anyhow::anyhow!("phase 0 manifest missing `metadata` array"))?;
+    let output = metadata
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.get("command").and_then(|value| value.as_str())
+                == Some("chain.gateway.migrate-from.phase-0-pause-deposits")
+        })
+        .and_then(|entry| entry.get("output"))
+        .ok_or_else(|| anyhow::anyhow!("phase 0 manifest missing migrate-from output metadata"))?;
 
-    if let Some(error) = json.get("error") {
-        anyhow::bail!("zks_lastSettlementChangeBlock RPC error: {error}");
-    }
-
-    match json.get("result").unwrap_or(&serde_json::Value::Null) {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::Number(number) => Ok(Some(number.as_u64().ok_or_else(|| {
-            anyhow::anyhow!("zks_lastSettlementChangeBlock returned non-u64 number: {number}")
-        })?)),
-        serde_json::Value::String(raw) => {
-            let value = if let Some(hex) = raw.strip_prefix("0x") {
-                u64::from_str_radix(hex, 16)
-                    .with_context(|| format!("parse hex settlement-change block {raw}"))?
-            } else {
-                raw.parse::<u64>()
-                    .with_context(|| format!("parse decimal settlement-change block {raw}"))?
-            };
-            Ok(Some(value))
-        }
-        other => anyhow::bail!(
-            "zks_lastSettlementChangeBlock returned unsupported result shape: {other}"
-        ),
-    }
+    output
+        .get("previous_settlement_change_block")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "phase 0 output missing numeric `previous_settlement_change_block`: {output}"
+            )
+        })
 }
 
 async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
@@ -220,7 +212,6 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
         .config_path(&chain_config)
         .spawn(&anvil)
         .map_err(|e| anyhow::anyhow!("Failed to start chain server: {:?}", e))?;
-    let chain_l2_rpc = chain_server.rpc_url();
     let chain_l2_rpc_for_protocol_ops = chain_server.rpc_url_for(&preset.era_contracts);
 
     // Sanity check: the fixture must actually be settling on the gateway
@@ -232,13 +223,6 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     chain_server
         .wait_for_traffic_tx_executed_on_l1()
         .context("gateway-settling chain batches (pre-migration)")?;
-    let previous_settlement_change_block = get_last_settlement_change_block(&chain_l2_rpc)
-        .await
-        .context("read pre-phase-0 settlement-change block")?;
-    println!(
-        "Pre-phase-0 zks_lastSettlementChangeBlock: {:?}",
-        previous_settlement_change_block
-    );
 
     let eco_dir = integration_tests::l1_state::resolve_ecosystem_dir(&preset)?;
     let contracts_backend =
@@ -356,10 +340,16 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
             &eco.bridgehub,
             "--chain-id",
             &chain_id_str,
+            "--chain-rpc-url",
+            chain_l2_rpc_for_protocol_ops.as_str(),
             "--out",
             &phase0_safe_abs,
         ])
         .context("migrate-from phase 0 (pause-deposits + notify-server)")?;
+    let previous_settlement_change_block =
+        phase0_previous_settlement_change_block(&contracts_backend, &phase0_safe_rel)
+            .context("read pre-phase-0 settlement-change block from phase 0 output")?;
+    println!("Pre-phase-0 zks_lastSettlementChangeBlock: {previous_settlement_change_block}");
 
     contracts_backend
         .parse_safe_bundles(&phase0_safe_rel, &l1_rpc_url)?
@@ -374,23 +364,20 @@ async fn run_migrate_live_chain_from_gateway_test() -> Result<()> {
     // The test does not drive extra Gateway traffic here; it should cover the
     // protocol-ops wait instead of relying on incidental test-side draining.
     println!("  Waiting for server migration boundary to drain on gateway...");
-    let previous_settlement_change_block_arg =
-        previous_settlement_change_block.map(|block| block.to_string());
-    let mut phase1_wait_args = vec![
-        "chain",
-        "gateway",
-        "migrate-from",
-        "phase-1-wait-ready",
-        "--chain-id",
-        &chain_id_str,
-        "--chain-rpc-url",
-        chain_l2_rpc_for_protocol_ops.as_str(),
-    ];
-    if let Some(previous_block) = previous_settlement_change_block_arg.as_deref() {
-        phase1_wait_args.extend_from_slice(&["--previous-settlement-change-block", previous_block]);
-    }
+    let previous_settlement_change_block_arg = previous_settlement_change_block.to_string();
     contracts_backend
-        .protocol_ops(&phase1_wait_args)
+        .protocol_ops(&[
+            "chain",
+            "gateway",
+            "migrate-from",
+            "phase-1-wait-ready",
+            "--chain-id",
+            &chain_id_str,
+            "--chain-rpc-url",
+            chain_l2_rpc_for_protocol_ops.as_str(),
+            "--previous-settlement-change-block",
+            previous_settlement_change_block_arg.as_str(),
+        ])
         .context("migrate-from phase 1 (wait for server readiness)")?;
 
     // ── Phase 2: submit (chain admin) ────────────────────────────────────
