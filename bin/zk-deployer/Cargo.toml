@@ -1,0 +1,44 @@
+[package]
+name = "zk-deployer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "zk_deployer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zk-deployer"
+path = "src/main.rs"
+
+[dependencies]
+lib-server = { workspace = true, features = ["embedded-server"] }
+protocol_ops = { workspace = true }
+
+alloy = { workspace = true, features = [
+    "providers",
+    "network",
+    "transport-http",
+    "node-bindings",
+    "provider-anvil-api",
+] }
+anyhow = { workspace = true }
+futures = { workspace = true }
+blake2 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive", "wrap_help", "string"] }
+flate2 = { workspace = true }
+hex = { workspace = true }
+hex-literal = { workspace = true }
+human-panic = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+zk_os_api = { workspace = true }
+zk_os_basic_system = { workspace = true }
