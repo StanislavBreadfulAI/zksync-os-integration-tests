@@ -15,7 +15,7 @@ Add an opt-in **background activity mode** that continuously fires L2 transactio
 
 The production equivalent is the [`matter-labs/watchdog`](https://github.com/matter-labs/watchdog) TypeScript service. Key patterns borrowed:
 - Flow-per-activity-type: each activity runs as an independent loop with its own restart logic
-- Crash-safe restart: errors are caught, logged, and the loop retries after a delay — a silently dead background task would give false positives in tests
+- Crash-safe restart with bounded budget: errors are caught, logged, and the loop retries — but gives up after `MAX_CONSECUTIVE_ERRORS` consecutive failures
 - Start-to-start interval timing: next tick is scheduled from work-start, not work-end, preventing drift under slow RPC
 - `Option<Duration>` per activity type: `None` = disabled, `Some(interval)` = enabled at that rate
 
@@ -30,26 +30,26 @@ The production equivalent is the [`matter-labs/watchdog`](https://github.com/mat
 
 ### Wallet partitioning
 
-A new `ACTIVITY_WALLET_KEYS: [&str; 5]` constant in `bin/zk-deployer/src/l1_l2_deposit.rs`, alongside the existing `DEFAULT_L2_RICH_KEYS`. These are public test fixture keys using the Anvil HD mnemonic continuation (accounts #10–#14).
+`ACTIVITY_WALLET_KEYS: [&str; 10]` lives as a **private constant** in `tests/src/activity.rs`, not in `zk-deployer`. Private keys must not be reachable by test code via a public module (`zk_deployer::l1_l2_deposit` is `pub mod`); keeping them in the tests crate and unexported enforces the boundary by module visibility.
 
-`default_builder()` in `bin/zk-deployer/src/anvil.rs` is updated to pass `--accounts 15` so Anvil pre-funds accounts #10–#14 with 10,000 ETH on L1 automatically — no separate L1 funding step needed.
+`fund_activity_l2_wallets()` in `bin/zk-deployer/src/l1_l2_deposit.rs` takes `recipients: &[Address]` as a parameter — it only needs L2 destination addresses, not private keys. The fixture derives addresses from `ACTIVITY_WALLET_KEYS` and passes them in.
 
-A new `fund_activity_l2_wallets()` mirrors `fund_default_l2_wallets()` and is called from `apply` alongside existing wallet funding. The activity wallets are baked into the deployment cache snapshot — zero cost on cache hit.
+`default_builder()` in `bin/zk-deployer/src/anvil.rs` gains `--accounts 20`, so Anvil pre-funds all 20 accounts (#0–#19) with 10,000 ETH on L1. Accounts #10–#19 are the activity wallets' L1 addresses; no separate L1 funding step is needed.
 
-**No `activity_wallets()` accessor on `Chain`.** `activity.rs` reads `ACTIVITY_WALLET_KEYS` directly as a module-level constant, parses the signers internally, and passes `Vec<PrivateKeySigner>` into the task functions. Test code cannot accidentally reach these wallets; the boundary is enforced by module visibility, not convention.
+**Deposit wallet assignment:** each chain gets one dedicated deposit wallet from the activity pool (`chain_index % ACTIVITY_WALLET_KEYS.len()`). `Ecosystem::start_background_activity()` panics if `chain_count > ACTIVITY_WALLET_KEYS.len()` — a fail-fast rather than silent L1 nonce sharing. With 10 keys this covers all realistic test topologies.
 
-**Cache invalidation:** adding `ACTIVITY_WALLET_KEYS` to `l1_l2_deposit.rs` changes the `zk_deployer_src` content hash, and adding `activity.rs` to `tests/src/` changes the `tests_src` content hash — both are inputs to the cache key, so existing entries auto-invalidate without a schema bump.
+**State step:** `StepKey::ChainActivityWalletsFunded(u64)` is added to `state.rs` as a distinct resumable step alongside `ChainL2Funded`. The apply command checks and skips only if this specific step is already marked done — a state.json from a previous run without activity wallet support resumes correctly. The test cache auto-invalidates via content hashing (`zk_deployer_src` and `tests_src` both change when this feature is introduced); the distinct step key covers the non-cache (manual state.json) path.
 
 ### `ActivityConfig`
 
-Lives in `tests/src/activity.rs` (not a separate crate — this is test infrastructure; extracting to `lib/` is deferred until there's a second consumer).
+Lives in `tests/src/activity.rs`.
 
 ```rust
 #[derive(Clone)]
 pub struct ActivityConfig {
     /// L2 self-transfers, round-robin across ACTIVITY_WALLET_KEYS. None = disabled.
     pub l2_transfers: Option<Duration>,
-    /// L1→L2 deposits via Bridgehub, rotating depositor wallet. None = disabled.
+    /// L1→L2 deposits via Bridgehub, one dedicated wallet per chain. None = disabled.
     pub l1_deposits: Option<Duration>,
 }
 
@@ -80,6 +80,8 @@ pub struct ActivityHandle {
     txs_sent: Arc<AtomicU64>,
     deposits_sent: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,    // set when any task exhausts MAX_CONSECUTIVE_ERRORS
+    activity_started: Arc<AtomicBool>,  // cleared on stop()/Drop to allow restart
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -89,42 +91,52 @@ impl ActivityHandle {
     pub fn pause(&self);
     /// Resume after a pause.
     pub fn resume(&self);
-    /// Gracefully stop all background tasks and await their cancellation.
+    /// Stop all background tasks, await cancellation, and clear the activity_started
+    /// guard so start_background_activity() can be called again on the same chain.
     pub async fn stop(mut self);
-    /// Returns true if all background tasks are still running (none have crashed
-    /// and exhausted their restart budget). Use to assert activity health.
+    /// Returns false if any task has exhausted MAX_CONSECUTIVE_ERRORS and exited.
+    /// A healthy handle returns true even under transient errors (retries remain).
     pub fn is_alive(&self) -> bool;
-    /// Number of L2 transfers whose tx hash was accepted by the RPC so far
-    /// (submitted to mempool, not necessarily mined).
+    /// Number of L2 transfers whose tx hash was accepted by the RPC (submitted to
+    /// mempool, not necessarily mined).
     pub fn txs_sent(&self) -> u64;
     /// Number of L1→L2 deposit transactions confirmed on L1 so far.
     pub fn deposits_sent(&self) -> u64;
 }
 
 impl Drop for ActivityHandle {
-    // Aborts all tasks (fire-and-forget). Tests that need clean shutdown call stop() explicitly.
+    // Aborts all tasks and clears activity_started (fire-and-forget).
     fn drop(&mut self);
 }
 ```
 
 ### Background task internals
 
-Each enabled flow spawns one tokio task. A `CRASH_RESTART_DELAY: Duration = Duration::from_secs(3)` constant caps how long the outer loop waits before retrying after a crash. The task structure follows the watchdog crash-safe pattern:
+```rust
+const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+const CRASH_RESTART_DELAY: Duration = Duration::from_secs(3);
+```
+
+Each enabled flow spawns one tokio task:
 
 ```
+consecutive_errors = 0
 outer loop (restart on crash):
+    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        set failed flag, return   ← terminal failure; is_alive() returns false
     inner loop (normal operation):
         if paused: sleep briefly, continue
         let tick_start = Instant::now();
         do work (send tx / deposit)
-        on success: increment counter
-        on error: log, break inner → outer restarts after min(interval, CRASH_RESTART_DELAY)
-        sleep until tick_start + interval  ← start-to-start timing
+        on success: increment counter; consecutive_errors = 0
+        on error:   log; consecutive_errors += 1; break inner
+    sleep min(interval, CRASH_RESTART_DELAY) before outer retry
+    sleep until tick_start + interval  ← start-to-start timing
 ```
 
 **L2 transfers**: rotate through `ACTIVITY_WALLET_KEYS` round-robin (index mod N). Each wallet has its own nonce sequence — no mutex needed.
 
-**L1→L2 deposits**: each chain gets one dedicated wallet from the activity pool (chain index mod 5), so no two chains' deposit loops share an L1 signer. No nonce races.
+**L1→L2 deposits**: each chain uses one dedicated wallet (`chain_index % ACTIVITY_WALLET_KEYS.len()`). That wallet owns its own L1 nonce sequence — no races between chains.
 
 ### `Chain::start_background_activity()`
 
@@ -134,13 +146,13 @@ impl Chain {
 }
 ```
 
-Spawns one tokio task per enabled flow. Before spawning, atomically sets an `activity_started: Arc<AtomicBool>` on the chain — **panics if already set**, since two activity loops over the same wallet pool would cause nonce collisions. Returns the handle immediately; `Chain` does not store it.
+`Chain` holds `activity_started: Arc<AtomicBool>`. On call, atomically sets it (panics if already set — programming error). Returns the handle immediately. The handle holds a clone of the same `Arc`; `stop()`/`Drop` clears it, allowing restart.
 
-The fixture path waits for the first successful tick on each enabled flow before returning, so a misconfigured activity setup fails fast at fixture time rather than silently mid-test.
+The fixture path waits for the first successful tick on each enabled flow before returning — a misconfigured setup fails fast at fixture time.
 
 ### `Ecosystem::start_background_activity()`
 
-Thin wrapper: calls `chain.start_background_activity(config.clone())` for every chain, stores the `Vec<ActivityHandle>` internally. Handles are dropped (tasks aborted) when `Ecosystem` drops.
+Thin wrapper: calls `chain.start_background_activity(config.clone())` for every chain, panics if `chain_count > ACTIVITY_WALLET_KEYS.len()`, stores the `Vec<ActivityHandle>` internally. Handles drop (tasks abort, guards clear) when `Ecosystem` drops.
 
 ### Fixture integration
 
@@ -174,15 +186,14 @@ async fn my_noisy_test(
 ```rust
 async fn my_precise_test(#[future] ecosystem: Ecosystem) -> Result<()> {
     let eco = ecosystem.await;
-    // assert initial state while silent
     let handle = eco.chain().start_background_activity(ActivityConfig::deposits_only());
-    // ... do test work under deposit noise ...
-    handle.pause(); // stops new deposit submissions; an in-flight deposit may still land
-    // ... assertion that does not require exactly zero in-flight deposits ...
+    // ... test work under deposit noise ...
+    handle.pause(); // stops new submissions; an in-flight deposit may still land
+    // ... assertion that tolerates a final in-flight deposit ...
     handle.resume();
     assert!(handle.deposits_sent() >= 1);
     assert!(handle.is_alive());
-    handle.stop().await;
+    handle.stop().await; // clears guard; could call start_background_activity() again
     Ok(())
 }
 ```
@@ -191,11 +202,12 @@ async fn my_precise_test(#[future] ecosystem: Ecosystem) -> Result<()> {
 
 | File | Change |
 |------|--------|
-| `bin/zk-deployer/src/anvil.rs` | Add `--accounts 15` to `default_builder()` |
-| `bin/zk-deployer/src/l1_l2_deposit.rs` | Add `ACTIVITY_WALLET_KEYS`, `fund_activity_l2_wallets()` |
-| `bin/zk-deployer/src/commands/apply/mod.rs` | Call `fund_activity_l2_wallets()` during apply |
-| `tests/src/activity.rs` | New: `ActivityConfig`, `ActivityHandle`, `run_l2_transfers`, `run_l1_deposits` |
+| `bin/zk-deployer/src/anvil.rs` | Add `--accounts 20` to `default_builder()` |
+| `bin/zk-deployer/src/l1_l2_deposit.rs` | Add `fund_activity_l2_wallets(recipients: &[Address])` |
+| `bin/zk-deployer/src/commands/apply/mod.rs` | Call `fund_activity_l2_wallets()` as a distinct step; add `StepKey::ChainActivityWalletsFunded(u64)` |
+| `bin/zk-deployer/src/state.rs` | Add `StepKey::ChainActivityWalletsFunded(u64)` variant |
+| `tests/src/activity.rs` | New: private `ACTIVITY_WALLET_KEYS`, `ActivityConfig`, `ActivityHandle`, `run_l2_transfers`, `run_l1_deposits` |
 | `tests/src/chain.rs` | Add `activity_started: Arc<AtomicBool>`, `start_background_activity()` |
-| `tests/src/ecosystem.rs` | Add `Vec<ActivityHandle>`, `start_background_activity()` |
-| `tests/src/fixtures/l1.rs` | Add `activity: Option<ActivityConfig>` param to `ecosystem` fixture |
+| `tests/src/ecosystem.rs` | Add `Vec<ActivityHandle>`, `start_background_activity()` with chain count guard |
+| `tests/src/fixtures/l1.rs` | Derive activity wallet addresses, pass to `fund_activity_l2_wallets()`; add `activity: Option<ActivityConfig>` param |
 | `tests/src/lib.rs` | Re-export `ActivityConfig`, `ActivityHandle` |
