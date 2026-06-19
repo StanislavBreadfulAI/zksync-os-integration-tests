@@ -30,11 +30,15 @@ The production equivalent is the [`matter-labs/watchdog`](https://github.com/mat
 
 ### Wallet partitioning
 
-A new `ACTIVITY_WALLET_KEYS: [&str; 5]` constant in `bin/zk-deployer/src/l1_l2_deposit.rs`, alongside the existing `DEFAULT_L2_RICH_KEYS`. These are public test fixture keys (e.g. Anvil HD mnemonic accounts #10–#14) — same pattern as test wallets, just a separate named pool.
+A new `ACTIVITY_WALLET_KEYS: [&str; 5]` constant in `bin/zk-deployer/src/l1_l2_deposit.rs`, alongside the existing `DEFAULT_L2_RICH_KEYS`. These are public test fixture keys using the Anvil HD mnemonic continuation (accounts #10–#14).
+
+`default_builder()` in `bin/zk-deployer/src/anvil.rs` is updated to pass `--accounts 15` so Anvil pre-funds accounts #10–#14 with 10,000 ETH on L1 automatically — no separate L1 funding step needed.
 
 A new `fund_activity_l2_wallets()` mirrors `fund_default_l2_wallets()` and is called from `apply` alongside existing wallet funding. The activity wallets are baked into the deployment cache snapshot — zero cost on cache hit.
 
-`Chain` gains an `activity_wallets()` accessor returning the parsed `ACTIVITY_WALLET_KEYS` signers. Test code never touches these; activity code never touches `wallet(0..N)`. The boundary is enforced by construction.
+**No `activity_wallets()` accessor on `Chain`.** `activity.rs` reads `ACTIVITY_WALLET_KEYS` directly as a module-level constant, parses the signers internally, and passes `Vec<PrivateKeySigner>` into the task functions. Test code cannot accidentally reach these wallets; the boundary is enforced by module visibility, not convention.
+
+**Cache invalidation:** adding `ACTIVITY_WALLET_KEYS` to `l1_l2_deposit.rs` changes the `zk_deployer_src` content hash, and adding `activity.rs` to `tests/src/` changes the `tests_src` content hash — both are inputs to the cache key, so existing entries auto-invalidate without a schema bump.
 
 ### `ActivityConfig`
 
@@ -80,15 +84,20 @@ pub struct ActivityHandle {
 }
 
 impl ActivityHandle {
-    /// Pause: background tasks sleep at the top of each iteration until resumed.
+    /// Stops new submissions. An in-flight L1→L2 deposit submitted just before
+    /// pause() may still arrive on L2 — do not rely on pause() for exact quiescing.
     pub fn pause(&self);
     /// Resume after a pause.
     pub fn resume(&self);
     /// Gracefully stop all background tasks and await their cancellation.
     pub async fn stop(mut self);
-    /// Number of L2 transfers successfully sent (tx hash returned) so far.
+    /// Returns true if all background tasks are still running (none have crashed
+    /// and exhausted their restart budget). Use to assert activity health.
+    pub fn is_alive(&self) -> bool;
+    /// Number of L2 transfers whose tx hash was accepted by the RPC so far
+    /// (submitted to mempool, not necessarily mined).
     pub fn txs_sent(&self) -> u64;
-    /// Number of L1→L2 deposits successfully submitted so far.
+    /// Number of L1→L2 deposit transactions confirmed on L1 so far.
     pub fn deposits_sent(&self) -> u64;
 }
 
@@ -97,8 +106,6 @@ impl Drop for ActivityHandle {
     fn drop(&mut self);
 }
 ```
-
-Counters increment on **confirmed send** (tx hash returned / deposit receipt received), not on submission attempt — meaningful for assertions like `assert!(handle.txs_sent() >= 3)`.
 
 ### Background task internals
 
@@ -117,7 +124,7 @@ outer loop (restart on crash):
 
 **L2 transfers**: rotate through `ACTIVITY_WALLET_KEYS` round-robin (index mod N). Each wallet has its own nonce sequence — no mutex needed.
 
-**L1→L2 deposits**: use a single wallet from the activity pool (rotating slowly, one per restart), submitting via `deposit_eth()` from `zk-deployer`. Uses a small fixed amount (1 ETH) so the activity wallet balance is not exhausted quickly.
+**L1→L2 deposits**: each chain gets one dedicated wallet from the activity pool (chain index mod 5), so no two chains' deposit loops share an L1 signer. No nonce races.
 
 ### `Chain::start_background_activity()`
 
@@ -127,7 +134,9 @@ impl Chain {
 }
 ```
 
-Spawns one tokio task per enabled flow. Returns the handle immediately — the caller owns it. `Chain` does not store the handle.
+Spawns one tokio task per enabled flow. Before spawning, atomically sets an `activity_started: Arc<AtomicBool>` on the chain — **panics if already set**, since two activity loops over the same wallet pool would cause nonce collisions. Returns the handle immediately; `Chain` does not store it.
+
+The fixture path waits for the first successful tick on each enabled flow before returning, so a misconfigured activity setup fails fast at fixture time rather than silently mid-test.
 
 ### `Ecosystem::start_background_activity()`
 
@@ -168,10 +177,11 @@ async fn my_precise_test(#[future] ecosystem: Ecosystem) -> Result<()> {
     // assert initial state while silent
     let handle = eco.chain().start_background_activity(ActivityConfig::deposits_only());
     // ... do test work under deposit noise ...
-    handle.pause();
-    // ... sensitive assertion with no new deposits ...
+    handle.pause(); // stops new deposit submissions; an in-flight deposit may still land
+    // ... assertion that does not require exactly zero in-flight deposits ...
     handle.resume();
     assert!(handle.deposits_sent() >= 1);
+    assert!(handle.is_alive());
     handle.stop().await;
     Ok(())
 }
@@ -181,14 +191,11 @@ async fn my_precise_test(#[future] ecosystem: Ecosystem) -> Result<()> {
 
 | File | Change |
 |------|--------|
+| `bin/zk-deployer/src/anvil.rs` | Add `--accounts 15` to `default_builder()` |
 | `bin/zk-deployer/src/l1_l2_deposit.rs` | Add `ACTIVITY_WALLET_KEYS`, `fund_activity_l2_wallets()` |
 | `bin/zk-deployer/src/commands/apply/mod.rs` | Call `fund_activity_l2_wallets()` during apply |
 | `tests/src/activity.rs` | New: `ActivityConfig`, `ActivityHandle`, `run_l2_transfers`, `run_l1_deposits` |
-| `tests/src/chain.rs` | Add `activity_wallets()`, `start_background_activity()` |
+| `tests/src/chain.rs` | Add `activity_started: Arc<AtomicBool>`, `start_background_activity()` |
 | `tests/src/ecosystem.rs` | Add `Vec<ActivityHandle>`, `start_background_activity()` |
 | `tests/src/fixtures/l1.rs` | Add `activity: Option<ActivityConfig>` param to `ecosystem` fixture |
 | `tests/src/lib.rs` | Re-export `ActivityConfig`, `ActivityHandle` |
-
-## Open questions
-
-None — all design decisions resolved in review.
