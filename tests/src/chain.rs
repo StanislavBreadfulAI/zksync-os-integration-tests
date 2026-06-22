@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::eips::BlockNumberOrTag;
@@ -7,6 +9,11 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context as _, Result};
+
+use crate::activity::{
+    run_l1_deposits, run_l2_transfers, ActivityConfig, ActivityHandle, ActivityState,
+    ACTIVITY_WALLET_KEYS,
+};
 
 /// Pre-funded test wallets, each rich on L2 after setup. These are the same
 /// well-known dev accounts that `zk-deployer` funds by default on local/Anvil
@@ -47,6 +54,14 @@ pub struct Chain {
     pub(crate) l1_rpc: String,
     pub(crate) l2_rpc: String,
     pub(crate) wallets: Vec<PrivateKeySigner>,
+    /// Index into `activity::ACTIVITY_WALLET_KEYS` for this chain's dedicated
+    /// L1 deposit signer. Set by `Ecosystem::assemble`; 0 for chains built
+    /// outside an ecosystem.
+    pub(crate) activity_wallet_index: usize,
+    /// Guards against starting two background-activity loops on the same chain
+    /// (which would race on the shared wallet pool's nonces). Cleared by
+    /// `ActivityHandle::stop`/`Drop`.
+    pub(crate) activity_started: Arc<AtomicBool>,
 }
 
 impl Chain {
@@ -58,6 +73,7 @@ impl Chain {
         l1_rpc: String,
         l2_rpc: String,
         wallets: Vec<PrivateKeySigner>,
+        activity_wallet_index: usize,
     ) -> Self {
         Self {
             chain_id,
@@ -65,6 +81,8 @@ impl Chain {
             l1_rpc,
             l2_rpc,
             wallets,
+            activity_wallet_index,
+            activity_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -163,6 +181,53 @@ impl Chain {
     pub async fn ping(&self) -> Result<TxHash> {
         let addr = self.wallet(0).address();
         self.transfer(addr, U256::from(1u64)).await
+    }
+
+    /// Start background activity ("noise") on this chain per `config`.
+    ///
+    /// Spawns one tokio task per enabled flow (L2 transfers, L1→L2 deposits)
+    /// and returns a handle to pause/stop/inspect them. Panics if activity is
+    /// already running on this chain — two loops would race on the shared
+    /// activity-wallet nonces. Call `ActivityHandle::stop().await` before
+    /// starting again.
+    pub fn start_background_activity(&self, config: ActivityConfig) -> ActivityHandle {
+        if self.activity_started.swap(true, Ordering::Relaxed) {
+            panic!(
+                "background activity already running on chain {} — \
+                 stop().await the existing handle before starting again",
+                self.chain_id
+            );
+        }
+
+        let state = ActivityState::new();
+        let mut tasks = Vec::new();
+
+        if let Some(interval) = config.l2_transfers {
+            let signers: Vec<PrivateKeySigner> = ACTIVITY_WALLET_KEYS
+                .iter()
+                .map(|k| k.parse().expect("parse activity wallet key"))
+                .collect();
+            tasks.push(tokio::spawn(run_l2_transfers(
+                self.l2_rpc.clone(),
+                signers,
+                interval,
+                state.clone(),
+            )));
+        }
+
+        if let Some(interval) = config.l1_deposits {
+            let depositor_sk = ACTIVITY_WALLET_KEYS[self.activity_wallet_index].to_string();
+            tasks.push(tokio::spawn(run_l1_deposits(
+                self.l1_rpc.clone(),
+                self.bridgehub_addr,
+                self.chain_id,
+                depositor_sk,
+                interval,
+                state.clone(),
+            )));
+        }
+
+        ActivityHandle::new(state, self.activity_started.clone(), tasks)
     }
 
     /// L2 ETH balance of `addr`.

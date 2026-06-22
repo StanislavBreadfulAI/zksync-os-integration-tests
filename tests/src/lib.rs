@@ -17,6 +17,7 @@
 //!
 //! See `tests/README.md` for the full API reference.
 
+pub mod activity;
 pub mod chain;
 pub mod ecosystem;
 pub mod eth;
@@ -27,6 +28,7 @@ pub mod upgrade_v30_to_v31;
 pub(crate) mod workdir;
 
 // Types available via `use tests::*`.
+pub use activity::{ActivityConfig, ActivityHandle, ActivityStats};
 pub use chain::{Chain, WALLET_KEYS};
 pub use ecosystem::Ecosystem;
 // Fixture functions are in `tests::fixtures`. Import them explicitly:
