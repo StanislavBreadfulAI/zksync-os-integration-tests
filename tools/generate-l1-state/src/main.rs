@@ -88,6 +88,13 @@ const ECOSYSTEM_CHAINS: &[ChainSpec] = &[
         name: "l1_settling",
         settles_on: SettlesOn::L1,
     },
+    // Second L1-settling chain so atomic-interop A<->B swaps can run purely on L1
+    // (no gateway in the path), exercising the L1-built interop roots.
+    ChainSpec {
+        id: 6568,
+        name: "l1_settling_b",
+        settles_on: SettlesOn::L1,
+    },
     ChainSpec {
         id: 6566,
         name: "gateway_settling_a",

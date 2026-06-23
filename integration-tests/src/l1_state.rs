@@ -16,9 +16,14 @@ use crate::presets::{Preset, RepoRef};
 /// Well-known chain name for the gateway in the `chains` map.
 pub const GATEWAY_CHAIN_NAME: &str = "gateway";
 
-/// Well-known chain name for the single L1-settling chain in the fixture
+/// Well-known chain name for the (first) L1-settling chain in the fixture
 /// ecosystem produced by `generate-l1-state`.
 pub const L1_SETTLING_CHAIN_NAME: &str = "l1_settling";
+
+/// Well-known chain name for the second L1-settling chain. Paired with
+/// [`L1_SETTLING_CHAIN_NAME`] for atomic-interop A<->B swaps that run purely on
+/// L1 (no gateway in the path).
+pub const L1_SETTLING_B_CHAIN_NAME: &str = "l1_settling_b";
 
 /// Well-known chain name for the first gateway-settling chain.
 pub const CHAIN_A_NAME: &str = "gateway_settling_a";
@@ -65,9 +70,14 @@ impl EcosystemConfig {
         self.chain(GATEWAY_CHAIN_NAME)
     }
 
-    /// The single L1-settling chain in the fixture.
+    /// The (first) L1-settling chain in the fixture.
     pub fn l1_settling(&self) -> (&'static str, u64) {
         self.chain(L1_SETTLING_CHAIN_NAME)
+    }
+
+    /// The second L1-settling chain in the fixture (atomic-interop swap peer).
+    pub fn l1_settling_b(&self) -> (&'static str, u64) {
+        self.chain(L1_SETTLING_B_CHAIN_NAME)
     }
 
     /// First gateway-settling chain in the fixture.
