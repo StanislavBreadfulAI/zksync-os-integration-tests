@@ -60,6 +60,8 @@ async fn atomic_swap_l1_settled(
             b.l2_rpc_url(),
             &b.chain_id().to_string(),
             &funded_key,
+            a.l1_rpc_url(),
+            &a.bridgehub_addr().to_string(),
         ])
         .current_dir(&driver_dir)
         .status()?;
