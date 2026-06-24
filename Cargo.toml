@@ -1,3 +1,61 @@
 [workspace]
 resolver = "2"
-members = ["integration-tests", "tools/build-artifacts", "tools/generate-l1-state"]
+members = [
+    "bin/zk-deployer",
+    "lib/server",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+lib-server = { path = "lib/server" }
+zk-deployer = { path = "bin/zk-deployer" }
+
+alloy = { version = "2.0.5", default-features = false }
+anyhow = "1.0"
+chrono = "0.4"
+clap = "4.5"
+flate2 = "1.0"
+fs2 = "0.4.3"
+futures = "0.3"
+hex = "0.4"
+human-panic = "2.0"
+protocol_ops = { git = "https://github.com/matter-labs/era-contracts", branch = "draft-v31" }
+zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", branch = "draft-v31" }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.3.0" }
+rstest = "0.26.1"
+serde = "1.0"
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.11"
+smart-config = "0.4.0-pre.4"
+tar = "0.4"
+tempfile = "3"
+thiserror = "2.0"
+tokio = "1"
+toml = "1.1.2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+zksync_os_server = { git = "https://github.com/matter-labs/zksync-os-server", branch = "main" }
+zksync_os_state_full_diffs = { git = "https://github.com/matter-labs/zksync-os-server", branch = "main" }
+
+# ── Local path overrides ───────────────────────────────────────────────────────
+# Uncomment to test against a local checkout instead of the pinned git rev.
+# For contracts you also need PROTOCOL_CONTRACTS_ROOT so the deployment cache
+# keys on file content rather than the git rev (see README.md § Local development).
+#
+# [patch."https://github.com/matter-labs/era-contracts"]
+# protocol_ops          = { path = "../era-contracts/protocol-ops" }
+# zksync-os-genesis-gen = { path = "../era-contracts/tools/zksync-os-genesis-gen" }
+#
+# [patch."https://github.com/matter-labs/zksync-os-server"]
+# zksync_os_server           = { path = "../zksync-os-server" }
+# zksync_os_state_full_diffs = { path = "../zksync-os-server" }
+
+[profile.release]
+# This is needed for zksync-airbender crates to compile in a reasonable time for x86-64-unknown-linux-gnu
+overflow-checks = true
