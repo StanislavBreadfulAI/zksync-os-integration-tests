@@ -4,6 +4,7 @@ pub mod deployed;
 pub mod identity;
 pub mod intent;
 pub mod l1_l2_deposit;
+pub mod l2_l1_withdraw;
 
 // Deployment internals (step journal, resolved addresses). Consumers go
 // through `deployed::DeployedEcosystem` instead.
