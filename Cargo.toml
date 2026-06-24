@@ -24,8 +24,8 @@ fs2 = "0.4.3"
 futures = "0.3"
 hex = "0.4"
 human-panic = "2.0"
-protocol_ops = { git = "https://github.com/matter-labs/era-contracts", branch = "draft-v31" }
-zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", branch = "draft-v31" }
+protocol_ops = { git = "https://github.com/matter-labs/era-contracts", branch = "atomic-imt-interop" }
+zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", branch = "atomic-imt-interop" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.3.0" }
 rstest = "0.26.1"
 serde = "1.0"
@@ -40,21 +40,21 @@ tokio = "1"
 toml = "1.1.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-zksync_os_server = { git = "https://github.com/matter-labs/zksync-os-server", branch = "main" }
-zksync_os_state_full_diffs = { git = "https://github.com/matter-labs/zksync-os-server", branch = "main" }
+zksync_os_server = { git = "https://github.com/matter-labs/zksync-os-server", branch = "kl/l1-settled-interop-proof" }
+zksync_os_state_full_diffs = { git = "https://github.com/matter-labs/zksync-os-server", branch = "kl/l1-settled-interop-proof" }
 
 # ── Local path overrides ───────────────────────────────────────────────────────
-# Uncomment to test against a local checkout instead of the pinned git rev.
-# For contracts you also need PROTOCOL_CONTRACTS_ROOT so the deployment cache
-# keys on file content rather than the git rev (see README.md § Local development).
-#
-# [patch."https://github.com/matter-labs/era-contracts"]
-# protocol_ops          = { path = "../era-contracts/protocol-ops" }
-# zksync-os-genesis-gen = { path = "../era-contracts/tools/zksync-os-genesis-gen" }
-#
-# [patch."https://github.com/matter-labs/zksync-os-server"]
-# zksync_os_server           = { path = "../zksync-os-server" }
-# zksync_os_state_full_diffs = { path = "../zksync-os-server" }
+# LOCAL DEV ONLY — do not commit. Points the deps at our feature-branch checkouts
+# (era-contracts atomic-imt-interop + zksync-os-server kl/l1-settled-interop-proof).
+# Also set PROTOCOL_CONTRACTS_ROOT to the same era-contracts checkout.
+# NB: the server repo root is a virtual workspace, so patch the package subdirs.
+[patch."https://github.com/matter-labs/era-contracts"]
+protocol_ops          = { path = "/Users/kalmanlajko/programming/zksync/zksync-era4/contracts/protocol-ops" }
+zksync-os-genesis-gen = { path = "/Users/kalmanlajko/programming/zksync/zksync-era4/contracts/tools/zksync-os-genesis-gen" }
+
+[patch."https://github.com/matter-labs/zksync-os-server"]
+zksync_os_server           = { path = "/Users/kalmanlajko/programming/zksync/zksync-os-server/node/bin" }
+zksync_os_state_full_diffs = { path = "/Users/kalmanlajko/programming/zksync/zksync-os-server/lib/state_full_diffs" }
 
 [profile.release]
 # This is needed for zksync-airbender crates to compile in a reasonable time for x86-64-unknown-linux-gnu

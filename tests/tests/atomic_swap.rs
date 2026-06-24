@@ -26,16 +26,8 @@ use std::process::Command;
 use tests::fixtures::ecosystem;
 use tests::Ecosystem;
 
-// Ignored in CI: this test needs the atomic-interop contracts (era-contracts `atomic-imt-interop`)
-// and the L1-interop server changes (zksync-os-server `kl/l1-settled-interop-proof`: #8 proof +
-// interop-watcher/block-production on L1), none of which are on the pinned refs CI builds (main
-// server / draft-v31 contracts). Until those land upstream, run it locally:
-//   1. point the deps at the local checkouts via the `[patch]` block in the workspace Cargo.toml,
-//   2. `PROTOCOL_CONTRACTS_ROOT=/abs/path/to/era-contracts \
-//        cargo test -p tests --release --test atomic_swap -- --ignored --nocapture`.
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires PROTOCOL_CONTRACTS_ROOT + local server/era-contracts atomic-interop patches; run manually"]
 async fn atomic_swap_l1_settled(
     #[future]
     #[with(vec![6565, 6566])]
