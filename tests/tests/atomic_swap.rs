@@ -228,14 +228,23 @@ fn token_transfer_data(asset_id: B256, amount: U256, recipient: Address) -> Byte
 
 /// Indirect-call ERC-7786 attribute with zero call value.
 fn indirect_call_attr() -> Bytes {
-    Bytes::from(IERC7786Attributes::indirectCallCall { callValue: U256::ZERO }.abi_encode())
+    Bytes::from(
+        IERC7786Attributes::indirectCallCall {
+            callValue: U256::ZERO,
+        }
+        .abi_encode(),
+    )
 }
 
 /// `atomicBundle` ERC-7786 attribute carrying the out-of-band atomic params.
 fn atomic_bundle_attr(flow_id: B256, deadline: u64, low_nullifier_index: U256) -> Bytes {
     Bytes::from(
-        IERC7786Attributes::atomicBundleCall { flowId: flow_id, deadline, lowNullifierIndex: low_nullifier_index }
-            .abi_encode(),
+        IERC7786Attributes::atomicBundleCall {
+            flowId: flow_id,
+            deadline,
+            lowNullifierIndex: low_nullifier_index,
+        }
+        .abi_encode(),
     )
 }
 
@@ -243,7 +252,11 @@ fn atomic_bundle_attr(flow_id: B256, deadline: u64, low_nullifier_index: U256) -
 fn bridge_call_starter(source: &ChainCtx, amount: U256, recipient: Address) -> InteropCallStarter {
     InteropCallStarter {
         to: encode_evm_address(ASSET_ROUTER),
-        data: token_transfer_data(ntv_asset_id(source.chain_id, source.token), amount, recipient),
+        data: token_transfer_data(
+            ntv_asset_id(source.chain_id, source.token),
+            amount,
+            recipient,
+        ),
         callAttributes: vec![indirect_call_attr()],
     }
 }
@@ -271,7 +284,8 @@ async fn l2_provider(rpc: &str, signer: PrivateKeySigner) -> Result<DynProvider>
 
 /// Deploy a fresh TestnetERC20Token (creation bytecode from the era-contracts forge `out/`), returning its address.
 async fn deploy_token(provider: &DynProvider, era_root: &PathBuf) -> Result<Address> {
-    let artifact_path = era_root.join("l1-contracts/out/TestnetERC20Token.sol/TestnetERC20Token.json");
+    let artifact_path =
+        era_root.join("l1-contracts/out/TestnetERC20Token.sol/TestnetERC20Token.json");
     let json: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(&artifact_path)
             .with_context(|| format!("read token artifact {}", artifact_path.display()))?,
@@ -279,31 +293,56 @@ async fn deploy_token(provider: &DynProvider, era_root: &PathBuf) -> Result<Addr
     let bytecode_hex = json["bytecode"]["object"]
         .as_str()
         .context("token artifact missing bytecode.object")?;
-    let mut init = hex::decode(bytecode_hex.trim_start_matches("0x")).context("decode token bytecode")?;
+    let mut init =
+        hex::decode(bytecode_hex.trim_start_matches("0x")).context("decode token bytecode")?;
     init.extend_from_slice(
-        &("AtomicTest".to_string(), "ATT".to_string(), U256::from(TOKEN_DECIMALS)).abi_encode_params(),
+        &(
+            "AtomicTest".to_string(),
+            "ATT".to_string(),
+            U256::from(TOKEN_DECIMALS),
+        )
+            .abi_encode_params(),
     );
     let tx = TransactionRequest::default()
         .with_deploy_code(init)
         .with_gas_limit(TX_GAS);
     let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     ensure!(receipt.status(), "token deploy reverted");
-    receipt.contract_address.context("no contract address in deploy receipt")
+    receipt
+        .contract_address
+        .context("no contract address in deploy receipt")
 }
 
 /// Deploy + mint + register-with-NTV + approve a test token for `signer` on the chain at `rpc`.
-async fn setup_token(rpc: &str, chain_id: u64, signer: PrivateKeySigner, mint: U256) -> Result<ChainCtx> {
+async fn setup_token(
+    rpc: &str,
+    chain_id: u64,
+    signer: PrivateKeySigner,
+    mint: U256,
+) -> Result<ChainCtx> {
     let provider = l2_provider(rpc, signer.clone()).await?;
     let user = signer.address();
     let token = deploy_token(&provider, &era_root()).await?;
 
     let erc20 = ITestnetERC20::new(token, &provider);
-    let r = erc20.mint(user, mint).gas(TX_GAS).send().await?.get_receipt().await?;
+    let r = erc20
+        .mint(user, mint)
+        .gas(TX_GAS)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
     ensure!(r.status(), "mint reverted");
 
     let ntv = IL2NativeTokenVault::new(NATIVE_TOKEN_VAULT, &provider);
     if ntv.assetId(token).call().await? == B256::ZERO {
-        let r = ntv.registerToken(token).gas(TX_GAS).send().await?.get_receipt().await?;
+        let r = ntv
+            .registerToken(token)
+            .gas(TX_GAS)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
         ensure!(r.status(), "registerToken reverted");
     }
     let r = erc20
@@ -315,29 +354,49 @@ async fn setup_token(rpc: &str, chain_id: u64, signer: PrivateKeySigner, mint: U
         .await?;
     ensure!(r.status(), "approve reverted");
     println!("[atomic-swap] chain {chain_id}: token {token} deployed/registered/approved");
-    Ok(ChainCtx { chain_id, provider, token })
+    Ok(ChainCtx {
+        chain_id,
+        provider,
+        token,
+    })
 }
 
 /// Register the two chains with each other for interop (sets `baseTokenAssetId` cross-chain), polling until set.
-async fn register_chains_for_interop(l1_rpc: &str, bridgehub: Address, a: &ChainCtx, b: &ChainCtx) -> Result<()> {
+async fn register_chains_for_interop(
+    l1_rpc: &str,
+    bridgehub: Address,
+    a: &ChainCtx,
+    b: &ChainCtx,
+) -> Result<()> {
     let l1_signer: PrivateKeySigner = ANVIL_KEY0.parse()?;
     let l1 = ProviderBuilder::new()
         .wallet(EthereumWallet::from(l1_signer))
         .connect(l1_rpc)
         .await?
         .erased();
-    let sender_addr = IL1Bridgehub::new(bridgehub, &l1).chainRegistrationSender().call().await?;
+    let sender_addr = IL1Bridgehub::new(bridgehub, &l1)
+        .chainRegistrationSender()
+        .call()
+        .await?;
     let sender = IChainRegistrationSender::new(sender_addr, &l1);
     println!("[atomic-swap] chainRegistrationSender = {sender_addr}");
 
     // A must learn B (registerChain(B, A)) and vice versa.
     for (to_register, registered_on) in [(b, a), (a, b)] {
         let l2bh = IL2Bridgehub::new(L2_BRIDGEHUB, &registered_on.provider);
-        if l2bh.baseTokenAssetId(U256::from(to_register.chain_id)).call().await? != B256::ZERO {
+        if l2bh
+            .baseTokenAssetId(U256::from(to_register.chain_id))
+            .call()
+            .await?
+            != B256::ZERO
+        {
             continue;
         }
         let r = sender
-            .registerChain(U256::from(to_register.chain_id), U256::from(registered_on.chain_id))
+            .registerChain(
+                U256::from(to_register.chain_id),
+                U256::from(registered_on.chain_id),
+            )
             .gas(TX_GAS)
             .send()
             .await?
@@ -347,7 +406,12 @@ async fn register_chains_for_interop(l1_rpc: &str, bridgehub: Address, a: &Chain
         // Poll until the L2 service tx lands and sets the base-token asset id.
         let start = Instant::now();
         loop {
-            if l2bh.baseTokenAssetId(U256::from(to_register.chain_id)).call().await? != B256::ZERO {
+            if l2bh
+                .baseTokenAssetId(U256::from(to_register.chain_id))
+                .call()
+                .await?
+                != B256::ZERO
+            {
                 break;
             }
             ensure!(
@@ -358,13 +422,22 @@ async fn register_chains_for_interop(l1_rpc: &str, bridgehub: Address, a: &Chain
             );
             sleep(Duration::from_secs(1)).await;
         }
-        println!("[atomic-swap] chain {} now knows {}", registered_on.chain_id, to_register.chain_id);
+        println!(
+            "[atomic-swap] chain {} now knows {}",
+            registered_on.chain_id, to_register.chain_id
+        );
     }
     Ok(())
 }
 
 /// Predict a leg's bundleHash via an atomic `sendBundle` callStatic (bundleHash is independent of the atomic params).
-async fn predict_bundle_hash(source: &ChainCtx, dest: &ChainCtx, amount: U256, recipient: Address, fee: U256) -> Result<B256> {
+async fn predict_bundle_hash(
+    source: &ChainCtx,
+    dest: &ChainCtx,
+    amount: U256,
+    recipient: Address,
+    fee: U256,
+) -> Result<B256> {
     let ic = IInteropCenter::new(INTEROP_CENTER, &source.provider);
     Ok(ic
         .sendBundle(
@@ -423,7 +496,10 @@ async fn send_atomic_leg(
         }
         if let Ok(decoded) = IInteropCenter::InteropBundleSent::decode_log(&log.inner) {
             let data = decoded.data;
-            found = Some((data.interopBundleHash, Bytes::from(data.interopBundle.abi_encode())));
+            found = Some((
+                data.interopBundleHash,
+                Bytes::from(data.interopBundle.abi_encode()),
+            ));
             break;
         }
     }
@@ -460,17 +536,27 @@ async fn commitment_tree_message_index(provider: &DynProvider, tx_hash: B256) ->
 }
 
 /// Poll `zks_getL2ToL1LogProof` (messageRoot target) until the commitment-tree publish in `tx_hash` settles.
-async fn wait_for_message_proof(provider: &DynProvider, tx_hash: B256, msg_index: u64) -> Result<RawLogProof> {
+async fn wait_for_message_proof(
+    provider: &DynProvider,
+    tx_hash: B256,
+    msg_index: u64,
+) -> Result<RawLogProof> {
     let start = Instant::now();
     loop {
         let res: Option<RawLogProof> = provider
-            .raw_request("zks_getL2ToL1LogProof".into(), (tx_hash, msg_index, "messageRoot"))
+            .raw_request(
+                "zks_getL2ToL1LogProof".into(),
+                (tx_hash, msg_index, "messageRoot"),
+            )
             .await
             .context("zks_getL2ToL1LogProof")?;
         if let Some(p) = res {
             return Ok(p);
         }
-        ensure!(start.elapsed() < Duration::from_secs(300), "timed out waiting for message proof of {tx_hash}");
+        ensure!(
+            start.elapsed() < Duration::from_secs(300),
+            "timed out waiting for message proof of {tx_hash}"
+        );
         sleep(Duration::from_secs(1)).await;
     }
 }
@@ -506,7 +592,11 @@ async fn build_inclusion_proof(
 }
 
 /// Poll a chain's L2InteropRootStorage until it imports the interop root for `(l1_chain_id, sl_block)`.
-async fn wait_for_interop_root(provider: &DynProvider, l1_chain_id: u64, sl_block: u64) -> Result<()> {
+async fn wait_for_interop_root(
+    provider: &DynProvider,
+    l1_chain_id: u64,
+    sl_block: u64,
+) -> Result<()> {
     let storage = IL2InteropRootStorage::new(INTEROP_ROOT_STORAGE, provider);
     let start = Instant::now();
     loop {
@@ -550,11 +640,18 @@ async fn atomic_swap_l1_settled(
     let b_amount = U256::from(10u64).pow(U256::from(TOKEN_DECIMALS)) * U256::from(7u64);
     let mint = U256::from(10u64).pow(U256::from(TOKEN_DECIMALS)) * U256::from(1_000_000u64);
 
-    println!("[atomic-swap] setting up tokens on chains {} / {}", ca.chain_id(), cb.chain_id());
+    println!(
+        "[atomic-swap] setting up tokens on chains {} / {}",
+        ca.chain_id(),
+        cb.chain_id()
+    );
     let a = setup_token(ca.l2_rpc_url(), ca.chain_id(), signer.clone(), mint).await?;
     let b = setup_token(cb.l2_rpc_url(), cb.chain_id(), signer.clone(), mint).await?;
 
-    let fee = IInteropCenter::new(INTEROP_CENTER, &a.provider).interopProtocolFee().call().await?;
+    let fee = IInteropCenter::new(INTEROP_CENTER, &a.provider)
+        .interopProtocolFee()
+        .call()
+        .await?;
 
     println!("[atomic-swap] registering chains for interop...");
     register_chains_for_interop(ca.l1_rpc_url(), ca.bridgehub_addr(), &a, &b).await?;
@@ -582,10 +679,22 @@ async fn atomic_swap_l1_settled(
 
     let mgr_a = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &a.provider);
     let mgr_b = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &b.provider);
-    ensure!(mgr_a.legState(flow_id, h_ab).call().await? == LEG_COMMITTED, "AB committed on A");
-    ensure!(mgr_b.legState(flow_id, h_ba).call().await? == LEG_COMMITTED, "BA committed on B");
-    ensure!(a_token.balanceOf(user).call().await? == a_before - a_amount, "A burned aAmount");
-    ensure!(b_token.balanceOf(user).call().await? == b_before - b_amount, "B burned bAmount");
+    ensure!(
+        mgr_a.legState(flow_id, h_ab).call().await? == LEG_COMMITTED,
+        "AB committed on A"
+    );
+    ensure!(
+        mgr_b.legState(flow_id, h_ba).call().await? == LEG_COMMITTED,
+        "BA committed on B"
+    );
+    ensure!(
+        a_token.balanceOf(user).call().await? == a_before - a_amount,
+        "A burned aAmount"
+    );
+    ensure!(
+        b_token.balanceOf(user).call().await? == b_before - b_amount,
+        "B burned bAmount"
+    );
     println!("[atomic-swap] PHASE 1 ok: both legs committed (burn + IMT insert)");
 
     // ── PHASE 2: wait for L1 settlement, fetch real proofs, build inclusion proofs ──
@@ -596,7 +705,10 @@ async fn atomic_swap_l1_settled(
     let ba_raw = wait_for_message_proof(&b.provider, ba_tx, ba_msg_idx).await?;
     println!(
         "[atomic-swap] AB proof: batch={:?} slBlock={:?}; BA proof: batch={:?} slBlock={:?}",
-        ab_raw.batch_number, ab_raw.gateway_block_number, ba_raw.batch_number, ba_raw.gateway_block_number
+        ab_raw.batch_number,
+        ab_raw.gateway_block_number,
+        ba_raw.batch_number,
+        ba_raw.gateway_block_number
     );
 
     let ab_value = commit_value(flow_id, h_ab);
@@ -604,7 +716,11 @@ async fn atomic_swap_l1_settled(
     let ab_proof = build_inclusion_proof(&a, ab_value, ab_block, &ab_raw).await?;
     let ba_proof = build_inclusion_proof(&b, ba_value, ba_block, &ba_raw).await?;
     // Proofs ordered to match legBundleHashes ascending.
-    let proofs_asc = if h_ab < h_ba { vec![ab_proof, ba_proof] } else { vec![ba_proof, ab_proof] };
+    let proofs_asc = if h_ab < h_ba {
+        vec![ab_proof, ba_proof]
+    } else {
+        vec![ba_proof, ab_proof]
+    };
     let finality = AtomicFinalityProof {
         flowId: flow_id,
         deadline: DEADLINE,
@@ -615,7 +731,10 @@ async fn atomic_swap_l1_settled(
 
     // Both executeAtomicBundle calls verify every leg, so each executing chain must have imported the
     // L1 interop root at each leg's settlement block.
-    let l1 = ProviderBuilder::new().connect(ca.l1_rpc_url()).await?.erased();
+    let l1 = ProviderBuilder::new()
+        .connect(ca.l1_rpc_url())
+        .await?
+        .erased();
     let l1_chain_id = l1.get_chain_id().await?;
     let sl_blocks: Vec<u64> = [ab_raw.gateway_block_number, ba_raw.gateway_block_number]
         .into_iter()
@@ -649,22 +768,42 @@ async fn atomic_swap_l1_settled(
         .get_receipt()
         .await?;
     ensure!(r.status(), "executeAtomicBundle BA on A reverted");
-    ensure!(handler_b.bundleStatus(h_ab).call().await? == BUNDLE_FULLY_EXECUTED, "AB executed on B");
-    ensure!(handler_a.bundleStatus(h_ba).call().await? == BUNDLE_FULLY_EXECUTED, "BA executed on A");
+    ensure!(
+        handler_b.bundleStatus(h_ab).call().await? == BUNDLE_FULLY_EXECUTED,
+        "AB executed on B"
+    );
+    ensure!(
+        handler_a.bundleStatus(h_ba).call().await? == BUNDLE_FULLY_EXECUTED,
+        "BA executed on A"
+    );
 
     // ── Destination mint assertions ──
     let ntv_b = IL2NativeTokenVault::new(NATIVE_TOKEN_VAULT, &b.provider);
-    let shim_a_on_b = ntv_b.tokenAddress(ntv_asset_id(a.chain_id, a.token)).call().await?;
+    let shim_a_on_b = ntv_b
+        .tokenAddress(ntv_asset_id(a.chain_id, a.token))
+        .call()
+        .await?;
     ensure!(shim_a_on_b != Address::ZERO, "shim for A's token on B");
     ensure!(
-        ITestnetERC20::new(shim_a_on_b, &b.provider).balanceOf(user).call().await? == a_amount,
+        ITestnetERC20::new(shim_a_on_b, &b.provider)
+            .balanceOf(user)
+            .call()
+            .await?
+            == a_amount,
         "recipient on B got aAmount"
     );
     let ntv_a = IL2NativeTokenVault::new(NATIVE_TOKEN_VAULT, &a.provider);
-    let shim_b_on_a = ntv_a.tokenAddress(ntv_asset_id(b.chain_id, b.token)).call().await?;
+    let shim_b_on_a = ntv_a
+        .tokenAddress(ntv_asset_id(b.chain_id, b.token))
+        .call()
+        .await?;
     ensure!(shim_b_on_a != Address::ZERO, "shim for B's token on A");
     ensure!(
-        ITestnetERC20::new(shim_b_on_a, &a.provider).balanceOf(user).call().await? == b_amount,
+        ITestnetERC20::new(shim_b_on_a, &a.provider)
+            .balanceOf(user)
+            .call()
+            .await?
+            == b_amount,
         "recipient on A got bAmount"
     );
 
