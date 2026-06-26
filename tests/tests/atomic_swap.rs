@@ -22,7 +22,7 @@
 //! - The zksync-os-server local build must be the `kl/l1-settled-interop-proof` branch (L1
 //!   aggregation-hop proof + the `zks_getImt*` RPCs).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use alloy::network::{EthereumWallet, TransactionBuilder};
@@ -283,7 +283,7 @@ async fn l2_provider(rpc: &str, signer: PrivateKeySigner) -> Result<DynProvider>
 }
 
 /// Deploy a fresh TestnetERC20Token (creation bytecode from the era-contracts forge `out/`), returning its address.
-async fn deploy_token(provider: &DynProvider, era_root: &PathBuf) -> Result<Address> {
+async fn deploy_token(provider: &DynProvider, era_root: &Path) -> Result<Address> {
     let artifact_path =
         era_root.join("l1-contracts/out/TestnetERC20Token.sol/TestnetERC20Token.json");
     let json: serde_json::Value = serde_json::from_str(
@@ -439,17 +439,16 @@ async fn predict_bundle_hash(
     fee: U256,
 ) -> Result<B256> {
     let ic = IInteropCenter::new(INTEROP_CENTER, &source.provider);
-    Ok(ic
-        .sendBundle(
-            encode_evm_chain(dest.chain_id),
-            vec![bridge_call_starter(source, amount, recipient)],
-            vec![atomic_bundle_attr(B256::ZERO, DEADLINE, U256::ZERO)],
-        )
-        .value(fee)
-        .gas(ATOMIC_SEND_GAS)
-        .call()
-        .await
-        .context("predict sendBundle callStatic")?)
+    ic.sendBundle(
+        encode_evm_chain(dest.chain_id),
+        vec![bridge_call_starter(source, amount, recipient)],
+        vec![atomic_bundle_attr(B256::ZERO, DEADLINE, U256::ZERO)],
+    )
+    .value(fee)
+    .gas(ATOMIC_SEND_GAS)
+    .call()
+    .await
+    .context("predict sendBundle callStatic")
 }
 
 /// Atomic-send one leg (burn + IMT insert). Returns `(bundleData, bundleHash, txHash, sendBlock)`.
