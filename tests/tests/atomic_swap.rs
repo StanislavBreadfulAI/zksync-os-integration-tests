@@ -759,7 +759,7 @@ async fn atomic_swap_l1_settled(
         .await?
         .get_receipt()
         .await?;
-    ensure!(r.status(), "executeAtomicBundle AB on B reverted");
+    ensure!(r.status(), "executeAtomicBundle AB on B succeeds");
     let r = handler_a
         .executeAtomicBundle(ba_data, finality)
         .gas(TX_GAS)
@@ -767,14 +767,14 @@ async fn atomic_swap_l1_settled(
         .await?
         .get_receipt()
         .await?;
-    ensure!(r.status(), "executeAtomicBundle BA on A reverted");
+    ensure!(r.status(), "executeAtomicBundle BA on A succeeds");
     ensure!(
         handler_b.bundleStatus(h_ab).call().await? == BUNDLE_FULLY_EXECUTED,
-        "AB executed on B"
+        "AB bundle FullyExecuted on B"
     );
     ensure!(
         handler_a.bundleStatus(h_ba).call().await? == BUNDLE_FULLY_EXECUTED,
-        "BA executed on A"
+        "BA bundle FullyExecuted on A"
     );
 
     // ── Destination mint assertions ──
