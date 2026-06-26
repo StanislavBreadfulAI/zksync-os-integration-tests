@@ -615,10 +615,11 @@ async fn wait_for_interop_root(
     }
 }
 
+/// era-contracts root the harness built forge artifacts in. Uses the same resolver the deployer uses
+/// (`PROTOCOL_CONTRACTS_ROOT` if set, else the cargo git checkout) so it works in CI without the env
+/// var — the `ecosystem` fixture runs `build-contracts` against this same root, so `out/` exists here.
 fn era_root() -> PathBuf {
-    PathBuf::from(std::env::var("PROTOCOL_CONTRACTS_ROOT").expect(
-        "PROTOCOL_CONTRACTS_ROOT must point at the era-contracts atomic-imt-interop checkout",
-    ))
+    protocol_ops::common::paths::contracts_root()
 }
 
 #[rstest]
