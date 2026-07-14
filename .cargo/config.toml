@@ -5,3 +5,13 @@ rustflags = ["--cfg", "tokio_unstable"]
 # Proof generation has deep call stacks; 16 MiB avoids stack overflows when
 # running the server in-process (matches zksync-os-server's own config).
 RUST_MIN_STACK = { value = "16777216", force = false }
+
+# Local-checkout overrides (dev-only, do not commit): run the e2e against the
+# ad-atomic-interop working branches of era-contracts and zksync-os-server.
+[patch."https://github.com/matter-labs/era-contracts"]
+protocol_ops = { path = "/Users/antond/Desktop/zk_os_playground/era-contracts/protocol-ops" }
+zksync-os-genesis-gen = { path = "/Users/antond/Desktop/zk_os_playground/era-contracts/tools/zksync-os-genesis-gen" }
+
+[patch."https://github.com/matter-labs/zksync-os-server"]
+zksync_os_server = { path = "/Users/antond/Desktop/zk_os_playground/zksync-os-server/node/bin" }
+zksync_os_state_full_diffs = { path = "/Users/antond/Desktop/zk_os_playground/zksync-os-server/lib/state_full_diffs" }

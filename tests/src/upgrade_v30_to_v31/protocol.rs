@@ -182,7 +182,9 @@ pub async fn schedule_upgrade_timestamp(
     let ctm = protocol_ops::common::l1_contracts::resolve_ctm_proxy(l1_rpc, bridgehub, chain_id)
         .await
         .context("resolve CTM")?;
-    let target_pv = call(&provider, ctm, IChainTypeManagerAbi::protocolVersionCall {}).await?;
+    // Liveness check that the CTM proxy resolves; the target protocol version is now derived
+    // internally by `set-upgrade-timestamp` (the era-contracts command dropped its explicit arg).
+    let _target_pv = call(&provider, ctm, IChainTypeManagerAbi::protocolVersionCall {}).await?;
 
     let out_dir = workdir.join("schedule_upgrade");
     std::fs::create_dir_all(&out_dir).context("create out dir")?;
@@ -193,7 +195,6 @@ pub async fn schedule_upgrade_timestamp(
     chain::set_upgrade_timestamp::run(chain::set_upgrade_timestamp::ChainSetUpgradeTimestampArgs {
         topology: chain_args(bridgehub, chain_id),
         access_control_restriction: Address::ZERO,
-        new_protocol_version: target_pv.to_string(),
         upgrade_timestamp: upgrade_timestamp.to_string(),
         shared: shared_args(l1_rpc, &out_dir),
     })

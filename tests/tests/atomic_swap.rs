@@ -9,22 +9,24 @@
 //!   2. register the two chains with each other for interop (permissionless `registerChain`),
 //!   3. atomic-send both legs (burn + IMT insert), with the send-time low-nullifier index supplied
 //!      by the server's Rust IMT engine (`zks_getImtLowNullifierIndex`),
-//!   4. wait for each leg's commitment-tree root to settle on L1 and fetch the real message proof
-//!      (`zks_getL2ToL1LogProof`, the L1 aggregation-hop proof) plus the IMT inclusion proof
-//!      (`zks_getImtInclusionProof`, built + self-verified by the Rust engine),
+//!   4. wait for each send batch to execute on L1 and fetch the COMPLETE per-leg inclusion proof
+//!      (`zks_getImtInclusionProof`): the IMT membership half against the batch-end commitment-tree
+//!      root plus the settlement half authenticating that root as a chain-batch-root leaf against the
+//!      imported interop root — no separate L2->L1 message proof,
 //!   5. call `InteropHandler.executeAtomicBundle` per leg and assert both mints land and both source
 //!      legs stay Committed / both bundles report FullyExecuted.
 //!
 //! Requirements:
-//! - `PROTOCOL_CONTRACTS_ROOT` must point at the era-contracts `atomic-imt-interop` checkout (atomic
+//! - `PROTOCOL_CONTRACTS_ROOT` must point at the era-contracts atomic-interop checkout (atomic
 //!   genesis contracts + relaxed gateway-mode guards), and `out/TestnetERC20Token.sol/...` must be
 //!   built there (the token creation bytecode is read from it).
-//! - The zksync-os-server local build must be the `kl/l1-settled-interop-proof` branch (L1
-//!   aggregation-hop proof + the `zks_getImt*` RPCs).
+//! - The zksync-os-server local build must serve the chain-batch-root leaf proof model (dynamic-height
+//!   IMT + settlement-anchored `zks_getImt*` RPCs).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use alloy::eips::BlockNumberOrTag;
 use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::{address, keccak256, Address, Bytes, FixedBytes, B256, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
@@ -45,17 +47,20 @@ const INTEROP_CENTER: Address = address!("00000000000000000000000000000000000100
 const INTEROP_HANDLER: Address = address!("000000000000000000000000000000000001000e");
 const ATOMIC_FLOW_MANAGER: Address = address!("0000000000000000000000000000000000010014");
 const NATIVE_TOKEN_VAULT: Address = address!("0000000000000000000000000000000000010004");
-const COMMITMENT_TREE: Address = address!("0000000000000000000000000000000000010012");
 const L2_BRIDGEHUB: Address = address!("0000000000000000000000000000000000010002");
 const ASSET_ROUTER: Address = address!("0000000000000000000000000000000000010003");
 const INTEROP_ROOT_STORAGE: Address = address!("0000000000000000000000000000000000010008");
+#[allow(dead_code)]
+const COMMITMENT_TREE: Address = address!("0000000000000000000000000000000000010012");
 
 /// Standard Anvil account #0 — funded on the harness L1; `registerChain` is permissionless.
 const ANVIL_KEY0: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 const TOKEN_DECIMALS: u8 = 18;
-/// The flow deadline (an L1 settlement-layer block number); set well above the harness L1 head.
-const DEADLINE: u64 = 10_000_000;
+/// Buffer added to the current L1 timestamp to form the flow deadline. The deadline is now a
+/// settlement-layer TIMESTAMP (each leg's batch must settle on L1 before it); 24h is far beyond the
+/// few seconds a batch takes to settle on the harness Anvil.
+const DEADLINE_BUFFER_SECS: u64 = 24 * 3600;
 const ATOMIC_SEND_GAS: u64 = 3_000_000;
 const TX_GAS: u64 = 5_000_000;
 
@@ -92,23 +97,28 @@ sol! {
         BundleAttributes bundleAttributes;
     }
     struct IMTLeaf { uint256 value; uint256 nextIndex; uint256 nextValue; }
-    struct ImtInclusionProof {
+    // The server serves this COMPLETE (IMT half + settlement half); `settlementProof`
+    // authenticates `chainImtRoot` as a chain-batch-root leaf against the imported interop root,
+    // replacing the old L2->L1 message proof.
+    struct ImtProof {
         uint256 sourceChainId;
         uint256 batchNumber;
         bytes32 chainImtRoot;
-        uint16 messageTxNumberInBatch;
-        uint256 messageIndex;
-        bytes32[] messageProof;
+        bytes32[] settlementProof;
         IMTLeaf leaf;
         uint256 imtLeafIndex;
         bytes32[] imtProof;
     }
-    struct AtomicFinalityProof {
+    struct AtomicFlow {
         bytes32 flowId;
         uint64 deadline;
+        uint256 settlementLayerChainId;
         bytes32[] legBundleHashes;
-        uint256[] chainIds;
-        ImtInclusionProof[] proofs;
+        uint256[] legSourceChainIds;
+    }
+    struct AtomicFinalityProof {
+        AtomicFlow flow;
+        ImtProof[] proofs;
     }
 
     #[sol(rpc)]
@@ -170,25 +180,22 @@ struct ChainCtx {
 // ── RPC response shapes (zks_* extensions) ──
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawLogProof {
-    batch_number: Option<u64>,
-    id: u64,
-    proof: Vec<B256>,
-    gateway_block_number: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RpcImtLeaf {
     value: U256,
     next_index: U256,
     next_value: U256,
 }
 
+/// The complete `zks_getImtInclusionProof` response: IMT half plus the settlement half
+/// (`settlement_proof` / `settlement_block_number`) that authenticates `chain_imt_root` against the
+/// imported interop root. Mirrors the server's `ImtProof` (lib/rpc_api/src/types.rs).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcImtProof {
+    batch_number: u64,
+    settlement_block_number: Option<u64>,
     chain_imt_root: B256,
+    settlement_proof: Vec<B256>,
     leaf: RpcImtLeaf,
     imt_leaf_index: u64,
     imt_proof: Vec<B256>,
@@ -261,9 +268,24 @@ fn bridge_call_starter(source: &ChainCtx, amount: U256, recipient: Address) -> I
     }
 }
 
-/// `flowId = keccak256(abi.encode(bytes32[] legBundleHashes, uint256[] chainIds, uint64 deadline))` (both arrays ascending).
-fn compute_flow_id(leg_hashes_asc: &[B256], chain_ids_asc: &[U256], deadline: u64) -> B256 {
-    keccak256((leg_hashes_asc.to_vec(), chain_ids_asc.to_vec(), deadline).abi_encode_params())
+/// `flowId = keccak256(abi.encode(bytes32[] legBundleHashes, uint256[] legSourceChainIds, uint64 deadline, uint256 settlementLayerChainId))`.
+/// `legBundleHashes` is strictly ascending; `legSourceChainIds` is POSITIONAL (aligned 1:1 with the
+/// hashes, may repeat, need not be sorted).
+fn compute_flow_id(
+    leg_hashes_asc: &[B256],
+    leg_source_chain_ids: &[U256],
+    deadline: u64,
+    settlement_layer_chain_id: U256,
+) -> B256 {
+    keccak256(
+        (
+            leg_hashes_asc.to_vec(),
+            leg_source_chain_ids.to_vec(),
+            deadline,
+            settlement_layer_chain_id,
+        )
+            .abi_encode_params(),
+    )
 }
 
 /// `commitValue = keccak256(abi.encode(bytes4 ATOMIC_COMMIT_LEAF_TAG, bytes32 flowId, bytes32 bundleHash))` as uint256.
@@ -439,10 +461,12 @@ async fn predict_bundle_hash(
     fee: U256,
 ) -> Result<B256> {
     let ic = IInteropCenter::new(INTEROP_CENTER, &source.provider);
+    // bundleHash is independent of the atomic params (flowId/deadline/lowNullifier), so the
+    // placeholder values here don't affect the predicted hash.
     ic.sendBundle(
         encode_evm_chain(dest.chain_id),
         vec![bridge_call_starter(source, amount, recipient)],
-        vec![atomic_bundle_attr(B256::ZERO, DEADLINE, U256::ZERO)],
+        vec![atomic_bundle_attr(B256::ZERO, 0, U256::ZERO)],
     )
     .value(fee)
     .gas(ATOMIC_SEND_GAS)
@@ -458,6 +482,7 @@ async fn send_atomic_leg(
     amount: U256,
     recipient: Address,
     flow_id: B256,
+    deadline: u64,
     predicted_hash: B256,
     fee: U256,
 ) -> Result<(Bytes, B256, B256, u64)> {
@@ -476,7 +501,7 @@ async fn send_atomic_leg(
         .sendBundle(
             encode_evm_chain(dest.chain_id),
             vec![bridge_call_starter(source, amount, recipient)],
-            vec![atomic_bundle_attr(flow_id, DEADLINE, U256::from(low_null))],
+            vec![atomic_bundle_attr(flow_id, deadline, U256::from(low_null))],
         )
         .value(fee)
         .gas(ATOMIC_SEND_GAS)
@@ -517,77 +542,57 @@ async fn send_atomic_leg(
     Ok((bundle_data, bundle_hash, tx_hash, send_block))
 }
 
-/// Index of the commitment-tree (0x10012) L2->L1 message within the tx (mirrors the TS scan; 0 fallback).
-async fn commitment_tree_message_index(provider: &DynProvider, tx_hash: B256) -> Result<u64> {
-    let receipt: serde_json::Value = provider
-        .raw_request("eth_getTransactionReceipt".into(), (tx_hash,))
-        .await
-        .context("eth_getTransactionReceipt (raw)")?;
-    let tree = format!("{:#x}", COMMITMENT_TREE);
-    if let Some(logs) = receipt["l2ToL1Logs"].as_array() {
-        for (idx, l) in logs.iter().enumerate() {
-            if l["sender"].as_str().unwrap_or("").to_lowercase() == tree {
-                return Ok(idx as u64);
-            }
-        }
-    }
-    Ok(0)
-}
-
-/// Poll `zks_getL2ToL1LogProof` (messageRoot target) until the commitment-tree publish in `tx_hash` settles.
-async fn wait_for_message_proof(
-    provider: &DynProvider,
-    tx_hash: B256,
-    msg_index: u64,
-) -> Result<RawLogProof> {
-    let start = Instant::now();
-    loop {
-        let res: Option<RawLogProof> = provider
-            .raw_request(
-                "zks_getL2ToL1LogProof".into(),
-                (tx_hash, msg_index, "messageRoot"),
-            )
-            .await
-            .context("zks_getL2ToL1LogProof")?;
-        if let Some(p) = res {
-            return Ok(p);
-        }
-        ensure!(
-            start.elapsed() < Duration::from_secs(300),
-            "timed out waiting for message proof of {tx_hash}"
-        );
-        sleep(Duration::from_secs(1)).await;
-    }
-}
-
-/// Build a leg's `ImtInclusionProof`: IMT half from the Rust engine RPC, message half from the real proof.
-async fn build_inclusion_proof(
+/// Poll `zks_getImtInclusionProof(value, send_block)` until the batch containing the send executes on
+/// L1 and the complete proof is available. Returns the on-chain `ImtProof` plus the settlement-layer
+/// block its interop-root anchor resolved at (needed to await interop-root import on the executors).
+///
+/// The server errors with `BatchNotAvailableYet` ("...has not been finalized...") until the batch
+/// executes; a `null` result means the commit value is genuinely absent from the batch (fail fast).
+async fn wait_for_inclusion_proof(
     source: &ChainCtx,
     value: U256,
     send_block: u64,
-    raw: &RawLogProof,
-) -> Result<ImtInclusionProof> {
-    let imt: Option<RpcImtProof> = source
-        .provider
-        .raw_request("zks_getImtInclusionProof".into(), (value, send_block))
-        .await
-        .context("zks_getImtInclusionProof")?;
-    let imt = imt.context("commit value not present in IMT (server returned null)")?;
-    Ok(ImtInclusionProof {
-        sourceChainId: U256::from(source.chain_id),
-        batchNumber: U256::from(raw.batch_number.unwrap_or(0)),
-        chainImtRoot: imt.chain_imt_root,
-        messageTxNumberInBatch: 0,
-        messageIndex: U256::from(raw.id),
-        messageProof: raw.proof.clone(),
-        leaf: IMTLeaf {
-            value: imt.leaf.value,
-            nextIndex: imt.leaf.next_index,
-            nextValue: imt.leaf.next_value,
-        },
-        imtLeafIndex: U256::from(imt.imt_leaf_index),
-        imtProof: imt.imt_proof,
-    })
+) -> Result<(ImtProof, Option<u64>)> {
+    let start = Instant::now();
+    loop {
+        let res: Result<Option<RpcImtProof>, _> = source
+            .provider
+            .raw_request("zks_getImtInclusionProof".into(), (value, send_block))
+            .await;
+        match res {
+            Ok(Some(imt)) => {
+                let proof = ImtProof {
+                    sourceChainId: U256::from(source.chain_id),
+                    batchNumber: U256::from(imt.batch_number),
+                    chainImtRoot: imt.chain_imt_root,
+                    settlementProof: imt.settlement_proof,
+                    leaf: IMTLeaf {
+                        value: imt.leaf.value,
+                        nextIndex: imt.leaf.next_index,
+                        nextValue: imt.leaf.next_value,
+                    },
+                    imtLeafIndex: U256::from(imt.imt_leaf_index),
+                    imtProof: imt.imt_proof,
+                };
+                return Ok((proof, imt.settlement_block_number));
+            }
+            Ok(None) => {
+                anyhow::bail!("commit value {value} not present in IMT (server returned null)")
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // Retry only while the batch has not settled/executed on L1 yet.
+                if !msg.contains("not been finalized") && !msg.contains("not available") {
+                    return Err(anyhow::Error::from(e).context("zks_getImtInclusionProof"));
+                }
+                ensure!(
+                    start.elapsed() < Duration::from_secs(300),
+                    "timed out waiting for IMT inclusion proof of {value}"
+                );
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
 }
 
 /// Poll a chain's L2InteropRootStorage until it imports the interop root for `(l1_chain_id, sl_block)`.
@@ -656,15 +661,36 @@ async fn atomic_swap_l1_settled(
     println!("[atomic-swap] registering chains for interop...");
     register_chains_for_interop(ca.l1_rpc_url(), ca.bridgehub_addr(), &a, &b).await?;
 
+    // ── L1 (settlement layer) context: chain id + deadline (an L1 timestamp) ──
+    // These chains settle directly on L1 (no gateway), so the settlement layer is L1 itself.
+    let l1 = ProviderBuilder::new()
+        .connect(ca.l1_rpc_url())
+        .await?
+        .erased();
+    let l1_chain_id = l1.get_chain_id().await?;
+    let l1_now = l1
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .context("L1 latest block")?
+        .header
+        .timestamp;
+    let deadline = l1_now + DEADLINE_BUFFER_SECS;
+
     // ── Predict bundle hashes -> flowId ──
     let h_ab = predict_bundle_hash(&a, &b, a_amount, user, fee).await?;
     let h_ba = predict_bundle_hash(&b, &a, b_amount, user, fee).await?;
-    let mut leg_hashes_asc = [h_ab, h_ba];
-    leg_hashes_asc.sort();
-    let mut chain_ids_asc = [U256::from(a.chain_id), U256::from(b.chain_id)];
-    chain_ids_asc.sort();
-    let flow_id = compute_flow_id(&leg_hashes_asc, &chain_ids_asc, DEADLINE);
-    println!("[atomic-swap] flowId={flow_id} deadline={DEADLINE}");
+    // legBundleHashes ascending; legSourceChainIds POSITIONAL (aligned 1:1 with the sorted hashes).
+    let mut legs = [(h_ab, U256::from(a.chain_id)), (h_ba, U256::from(b.chain_id))];
+    legs.sort_by(|x, y| x.0.cmp(&y.0));
+    let leg_hashes_asc: Vec<B256> = legs.iter().map(|(h, _)| *h).collect();
+    let leg_source_chain_ids: Vec<U256> = legs.iter().map(|(_, c)| *c).collect();
+    let flow_id = compute_flow_id(
+        &leg_hashes_asc,
+        &leg_source_chain_ids,
+        deadline,
+        U256::from(l1_chain_id),
+    );
+    println!("[atomic-swap] flowId={flow_id} deadline={deadline} slChainId={l1_chain_id}");
 
     // ── PHASE 1: atomic send both legs ──
     let a_token = ITestnetERC20::new(a.token, &a.provider);
@@ -672,10 +698,10 @@ async fn atomic_swap_l1_settled(
     let a_before = a_token.balanceOf(user).call().await?;
     let b_before = b_token.balanceOf(user).call().await?;
 
-    let (ab_data, _ab_hash, ab_tx, ab_block) =
-        send_atomic_leg(&a, &b, a_amount, user, flow_id, h_ab, fee).await?;
-    let (ba_data, _ba_hash, ba_tx, ba_block) =
-        send_atomic_leg(&b, &a, b_amount, user, flow_id, h_ba, fee).await?;
+    let (ab_data, _ab_hash, _ab_tx, ab_block) =
+        send_atomic_leg(&a, &b, a_amount, user, flow_id, deadline, h_ab, fee).await?;
+    let (ba_data, _ba_hash, _ba_tx, ba_block) =
+        send_atomic_leg(&b, &a, b_amount, user, flow_id, deadline, h_ba, fee).await?;
 
     let mgr_a = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &a.provider);
     let mgr_b = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &b.provider);
@@ -697,24 +723,19 @@ async fn atomic_swap_l1_settled(
     );
     println!("[atomic-swap] PHASE 1 ok: both legs committed (burn + IMT insert)");
 
-    // ── PHASE 2: wait for L1 settlement, fetch real proofs, build inclusion proofs ──
-    let ab_msg_idx = commitment_tree_message_index(&a.provider, ab_tx).await?;
-    let ba_msg_idx = commitment_tree_message_index(&b.provider, ba_tx).await?;
-    println!("[atomic-swap] waiting for commitment-tree roots to settle on L1...");
-    let ab_raw = wait_for_message_proof(&a.provider, ab_tx, ab_msg_idx).await?;
-    let ba_raw = wait_for_message_proof(&b.provider, ba_tx, ba_msg_idx).await?;
-    println!(
-        "[atomic-swap] AB proof: batch={:?} slBlock={:?}; BA proof: batch={:?} slBlock={:?}",
-        ab_raw.batch_number,
-        ab_raw.gateway_block_number,
-        ba_raw.batch_number,
-        ba_raw.gateway_block_number
-    );
-
+    // ── PHASE 2: wait for L1 settlement, fetch the complete IMT inclusion proofs ──
+    // Each proof arrives whole from `zks_getImtInclusionProof` (IMT half + settlement half); the
+    // server blocks it until the send batch executes on L1, so this doubles as the settlement wait.
+    println!("[atomic-swap] waiting for send batches to execute on L1 + fetching IMT proofs...");
     let ab_value = commit_value(flow_id, h_ab);
     let ba_value = commit_value(flow_id, h_ba);
-    let ab_proof = build_inclusion_proof(&a, ab_value, ab_block, &ab_raw).await?;
-    let ba_proof = build_inclusion_proof(&b, ba_value, ba_block, &ba_raw).await?;
+    let (ab_proof, ab_sl_block) = wait_for_inclusion_proof(&a, ab_value, ab_block).await?;
+    let (ba_proof, ba_sl_block) = wait_for_inclusion_proof(&b, ba_value, ba_block).await?;
+    println!(
+        "[atomic-swap] AB proof: batch={} slBlock={:?}; BA proof: batch={} slBlock={:?}",
+        ab_proof.batchNumber, ab_sl_block, ba_proof.batchNumber, ba_sl_block
+    );
+
     // Proofs ordered to match legBundleHashes ascending.
     let proofs_asc = if h_ab < h_ba {
         vec![ab_proof, ba_proof]
@@ -722,24 +743,19 @@ async fn atomic_swap_l1_settled(
         vec![ba_proof, ab_proof]
     };
     let finality = AtomicFinalityProof {
-        flowId: flow_id,
-        deadline: DEADLINE,
-        legBundleHashes: leg_hashes_asc.to_vec(),
-        chainIds: chain_ids_asc.to_vec(),
+        flow: AtomicFlow {
+            flowId: flow_id,
+            deadline,
+            settlementLayerChainId: U256::from(l1_chain_id),
+            legBundleHashes: leg_hashes_asc.clone(),
+            legSourceChainIds: leg_source_chain_ids.clone(),
+        },
         proofs: proofs_asc,
     };
 
     // Both executeAtomicBundle calls verify every leg, so each executing chain must have imported the
     // L1 interop root at each leg's settlement block.
-    let l1 = ProviderBuilder::new()
-        .connect(ca.l1_rpc_url())
-        .await?
-        .erased();
-    let l1_chain_id = l1.get_chain_id().await?;
-    let sl_blocks: Vec<u64> = [ab_raw.gateway_block_number, ba_raw.gateway_block_number]
-        .into_iter()
-        .flatten()
-        .collect();
+    let sl_blocks: Vec<u64> = [ab_sl_block, ba_sl_block].into_iter().flatten().collect();
     println!("[atomic-swap] waiting for interop roots (L1 {l1_chain_id}) at blocks {sl_blocks:?} on both chains...");
     for ctx in [&a, &b] {
         for &sl in &sl_blocks {
