@@ -20,8 +20,9 @@
 //! - `PROTOCOL_CONTRACTS_ROOT` must point at the era-contracts atomic-interop checkout (atomic
 //!   genesis contracts + relaxed gateway-mode guards), and `out/TestnetERC20Token.sol/...` must be
 //!   built there (the token creation bytecode is read from it).
-//! - The zksync-os-server local build must serve the chain-batch-root leaf proof model (dynamic-height
-//!   IMT + settlement-anchored `zks_getImt*` RPCs).
+//! - The zksync-os-server build must serve the chain-batch-root leaf proof model (dynamic-height
+//!   IMT + settlement-anchored `zks_getImt*` RPCs) and the timestamped interop-root import
+//!   (`(blockNumber, root, timestamp)` tuples, struct-wrapped execute wire data).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -86,7 +87,7 @@ sol! {
         uint256 value;
         bytes data;
     }
-    struct BundleAttributes { bytes executionAddress; bytes unbundlerAddress; bool useFixedFee; }
+    struct BundleAttributes { bytes executionAddress; bytes unbundlerAddress; bool useFixedFee; bytes32 salt; }
     struct InteropBundle {
         bytes1 version;
         uint256 sourceChainId;
@@ -158,9 +159,10 @@ sol! {
     interface IChainRegistrationSender {
         function registerChain(uint256 chainToBeRegistered, uint256 chainRegisteredOn) external;
     }
+    // `interopRoots` returns the stored `(root, timestamp)` tuple (`StoredInteropRoot`).
     #[sol(rpc)]
     interface IL2InteropRootStorage {
-        function interopRoots(uint256 chainId, uint256 blockOrBatchNumber) external view returns (bytes32);
+        function interopRoots(uint256 chainId, uint256 blockOrBatchNumber) external view returns (bytes32 root, uint256 timestamp);
     }
     #[sol(rpc)]
     interface ITestnetERC20 {
@@ -608,6 +610,7 @@ async fn wait_for_interop_root(
             .interopRoots(U256::from(l1_chain_id), U256::from(sl_block))
             .call()
             .await?
+            .root
             != B256::ZERO
         {
             return Ok(());

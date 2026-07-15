@@ -24,8 +24,10 @@ fs2 = "0.4.3"
 futures = "0.3"
 hex = "0.4"
 human-panic = "2.0"
-protocol_ops = { git = "https://github.com/matter-labs/era-contracts", branch = "atomic-imt-interop" }
-zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", branch = "atomic-imt-interop" }
+# TODO: re-point at matter-labs/era-contracts ad-atomic-interop once its genesis-gen +
+# deploy-output fixes PR lands (the fork branch = ad-atomic-interop + that PR).
+protocol_ops = { git = "https://github.com/StanislavBreadfulAI/era-contracts", branch = "ad-genesis-gen-l2-interop-handler" }
+zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/StanislavBreadfulAI/era-contracts", branch = "ad-genesis-gen-l2-interop-handler" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.3.0" }
 rstest = "0.26.1"
 serde = "1.0"
@@ -40,8 +42,9 @@ tokio = "1"
 toml = "1.1.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-zksync_os_server = { git = "https://github.com/matter-labs/zksync-os-server", branch = "kl/l1-settled-interop-proof" }
-zksync_os_state_full_diffs = { git = "https://github.com/matter-labs/zksync-os-server", branch = "kl/l1-settled-interop-proof" }
+# TODO: re-point at matter-labs once the ad-atomic-interop server PR lands the timestamped-interop adaptation.
+zksync_os_server = { git = "https://github.com/StanislavBreadfulAI/zksync-os-server", branch = "ad-atomic-interop-timestamps" }
+zksync_os_state_full_diffs = { git = "https://github.com/StanislavBreadfulAI/zksync-os-server", branch = "ad-atomic-interop-timestamps" }
 
 # Local-checkout overrides for these git deps are DEV-ONLY and must not be committed.
 # Put them in a local `[patch]` (e.g. a git-ignored Cargo override / your own working copy),
