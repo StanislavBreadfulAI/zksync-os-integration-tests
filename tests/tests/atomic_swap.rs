@@ -105,6 +105,9 @@ sol! {
         uint256 sourceChainId;
         uint256 batchNumber;
         bytes32 chainImtRoot;
+        // Timeout-branch selector (begin vs end IMT root); ignored by the finality path this test
+        // exercises.
+        bool provesAgainstBeginRoot;
         bytes32[] settlementProof;
         IMTLeaf leaf;
         uint256 imtLeafIndex;
@@ -567,6 +570,7 @@ async fn wait_for_inclusion_proof(
                     sourceChainId: U256::from(source.chain_id),
                     batchNumber: U256::from(imt.batch_number),
                     chainImtRoot: imt.chain_imt_root,
+                    provesAgainstBeginRoot: false,
                     settlementProof: imt.settlement_proof,
                     leaf: IMTLeaf {
                         value: imt.leaf.value,
