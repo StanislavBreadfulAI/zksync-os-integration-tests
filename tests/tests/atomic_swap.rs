@@ -74,7 +74,16 @@ sol! {
     // ── ERC-7786 attribute encoders (selector + args via abi_encode) ──
     interface IERC7786Attributes {
         function indirectCall(uint256 callValue);
-        function atomicBundle(bytes32 flowId, uint64 deadline, uint256 lowNullifierIndex);
+        function atomicBundle(AtomicFlowPreimage flowPreimage, uint256 lowNullifierIndex);
+    }
+
+    // Mirrors atomic-interop/IAtomicInterop.sol: the flowId preimage. `legBundleHashes` strictly
+    // ascending; `legSourceChainIds` positional (aligned 1:1 with the sorted hashes).
+    struct AtomicFlowPreimage {
+        uint64 deadline;
+        uint256 settlementLayerChainId;
+        bytes32[] legBundleHashes;
+        uint256[] legSourceChainIds;
     }
 
     // ── Bundle / proof structs (mirror common/Messaging.sol + atomic-interop/IAtomicInterop.sol) ──
@@ -115,10 +124,7 @@ sol! {
     }
     struct AtomicFlow {
         bytes32 flowId;
-        uint64 deadline;
-        uint256 settlementLayerChainId;
-        bytes32[] legBundleHashes;
-        uint256[] legSourceChainIds;
+        AtomicFlowPreimage preimage;
     }
     struct AtomicFinalityProof {
         AtomicFlow flow;
@@ -248,12 +254,12 @@ fn indirect_call_attr() -> Bytes {
     )
 }
 
-/// `atomicBundle` ERC-7786 attribute carrying the out-of-band atomic params.
-fn atomic_bundle_attr(flow_id: B256, deadline: u64, low_nullifier_index: U256) -> Bytes {
+/// `atomicBundle` ERC-7786 attribute carrying the out-of-band atomic params (the flowId preimage
+/// plus the IMT low-nullifier index). Deliberately NOT part of the bundle hash (see InteropCenter).
+fn atomic_bundle_attr(preimage: AtomicFlowPreimage, low_nullifier_index: U256) -> Bytes {
     Bytes::from(
         IERC7786Attributes::atomicBundleCall {
-            flowId: flow_id,
-            deadline,
+            flowPreimage: preimage,
             lowNullifierIndex: low_nullifier_index,
         }
         .abi_encode(),
@@ -276,21 +282,9 @@ fn bridge_call_starter(source: &ChainCtx, amount: U256, recipient: Address) -> I
 /// `flowId = keccak256(abi.encode(bytes32[] legBundleHashes, uint256[] legSourceChainIds, uint64 deadline, uint256 settlementLayerChainId))`.
 /// `legBundleHashes` is strictly ascending; `legSourceChainIds` is POSITIONAL (aligned 1:1 with the
 /// hashes, may repeat, need not be sorted).
-fn compute_flow_id(
-    leg_hashes_asc: &[B256],
-    leg_source_chain_ids: &[U256],
-    deadline: u64,
-    settlement_layer_chain_id: U256,
-) -> B256 {
-    keccak256(
-        (
-            leg_hashes_asc.to_vec(),
-            leg_source_chain_ids.to_vec(),
-            deadline,
-            settlement_layer_chain_id,
-        )
-            .abi_encode_params(),
-    )
+/// `flowId = keccak256(abi.encode(preimage))` (AtomicFlowManager._validateAndComputeFlowId).
+fn compute_flow_id(preimage: &AtomicFlowPreimage) -> B256 {
+    keccak256(preimage.abi_encode())
 }
 
 /// `commitValue = keccak256(abi.encode(bytes4 ATOMIC_COMMIT_LEAF_TAG, bytes32 flowId, bytes32 bundleHash))` as uint256.
@@ -466,12 +460,14 @@ async fn predict_bundle_hash(
     fee: U256,
 ) -> Result<B256> {
     let ic = IInteropCenter::new(INTEROP_CENTER, &source.provider);
-    // bundleHash is independent of the atomic params (flowId/deadline/lowNullifier), so the
-    // placeholder values here don't affect the predicted hash.
+    // bundleHash is independent of the atomic attribute (the atomic metadata deliberately never
+    // enters the bundle - see InteropCenter._parseAtomicSend), so predict without it: the real
+    // attribute cannot be built yet (its preimage contains this bundle's own hash), and a
+    // placeholder would fail `append`'s bundle-is-a-leg check.
     ic.sendBundle(
         encode_evm_chain(dest.chain_id),
         vec![bridge_call_starter(source, amount, recipient)],
-        vec![atomic_bundle_attr(B256::ZERO, 0, U256::ZERO)],
+        vec![],
     )
     .value(fee)
     .gas(ATOMIC_SEND_GAS)
@@ -487,7 +483,7 @@ async fn send_atomic_leg(
     amount: U256,
     recipient: Address,
     flow_id: B256,
-    deadline: u64,
+    preimage: &AtomicFlowPreimage,
     predicted_hash: B256,
     fee: U256,
 ) -> Result<(Bytes, B256, B256, u64)> {
@@ -506,7 +502,7 @@ async fn send_atomic_leg(
         .sendBundle(
             encode_evm_chain(dest.chain_id),
             vec![bridge_call_starter(source, amount, recipient)],
-            vec![atomic_bundle_attr(flow_id, deadline, U256::from(low_null))],
+            vec![atomic_bundle_attr(preimage.clone(), U256::from(low_null))],
         )
         .value(fee)
         .gas(ATOMIC_SEND_GAS)
@@ -691,12 +687,13 @@ async fn atomic_swap_l1_settled(
     legs.sort_by(|x, y| x.0.cmp(&y.0));
     let leg_hashes_asc: Vec<B256> = legs.iter().map(|(h, _)| *h).collect();
     let leg_source_chain_ids: Vec<U256> = legs.iter().map(|(_, c)| *c).collect();
-    let flow_id = compute_flow_id(
-        &leg_hashes_asc,
-        &leg_source_chain_ids,
+    let preimage = AtomicFlowPreimage {
         deadline,
-        U256::from(l1_chain_id),
-    );
+        settlementLayerChainId: U256::from(l1_chain_id),
+        legBundleHashes: leg_hashes_asc.clone(),
+        legSourceChainIds: leg_source_chain_ids.clone(),
+    };
+    let flow_id = compute_flow_id(&preimage);
     println!("[atomic-swap] flowId={flow_id} deadline={deadline} slChainId={l1_chain_id}");
 
     // ── PHASE 1: atomic send both legs ──
@@ -706,9 +703,9 @@ async fn atomic_swap_l1_settled(
     let b_before = b_token.balanceOf(user).call().await?;
 
     let (ab_data, _ab_hash, _ab_tx, ab_block) =
-        send_atomic_leg(&a, &b, a_amount, user, flow_id, deadline, h_ab, fee).await?;
+        send_atomic_leg(&a, &b, a_amount, user, flow_id, &preimage, h_ab, fee).await?;
     let (ba_data, _ba_hash, _ba_tx, ba_block) =
-        send_atomic_leg(&b, &a, b_amount, user, flow_id, deadline, h_ba, fee).await?;
+        send_atomic_leg(&b, &a, b_amount, user, flow_id, &preimage, h_ba, fee).await?;
 
     let mgr_a = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &a.provider);
     let mgr_b = IAtomicFlowManager::new(ATOMIC_FLOW_MANAGER, &b.provider);
@@ -752,10 +749,7 @@ async fn atomic_swap_l1_settled(
     let finality = AtomicFinalityProof {
         flow: AtomicFlow {
             flowId: flow_id,
-            deadline,
-            settlementLayerChainId: U256::from(l1_chain_id),
-            legBundleHashes: leg_hashes_asc.clone(),
-            legSourceChainIds: leg_source_chain_ids.clone(),
+            preimage: preimage.clone(),
         },
         proofs: proofs_asc,
     };
