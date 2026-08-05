@@ -35,7 +35,7 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent, SolValue};
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use rstest::rstest;
 use serde::Deserialize;
 use tokio::time::sleep;
@@ -77,14 +77,20 @@ sol! {
         function atomicBundle(AtomicFlowPreimage flowPreimage, uint256 lowNullifierIndex);
     }
 
-    // Mirrors atomic-interop/IAtomicInterop.sol: the flowId preimage. `legBundleHashes` strictly
-    // ascending; `legSourceChainIds` positional (aligned 1:1 with the sorted hashes).
+    // Mirrors atomic-interop/IAtomicInterop.sol: the flowId preimage. `version` must equal
+    // ATOMIC_FLOW_PREIMAGE_VERSION (0x01); `legBundleHashes` strictly ascending;
+    // `legSourceChainIds` positional (aligned 1:1 with the sorted hashes).
     struct AtomicFlowPreimage {
+        bytes1 version;
         uint64 deadline;
         uint256 settlementLayerChainId;
         bytes32[] legBundleHashes;
         uint256[] legSourceChainIds;
     }
+
+    // AtomicFlowManager.append rejects a committing bundle that is not one of the flow's legs;
+    // the revert carries the actual bundle hash, which `predict_bundle_hash` extracts.
+    error ManagerCommittedBundleNotInFlow(bytes32 flowId, bytes32 bundleHash);
 
     // ── Bundle / proof structs (mirror common/Messaging.sol + atomic-interop/IAtomicInterop.sol) ──
     struct InteropCallStarter { bytes to; bytes data; bytes[] callAttributes; }
@@ -458,22 +464,43 @@ async fn predict_bundle_hash(
     amount: U256,
     recipient: Address,
     fee: U256,
+    deadline: u64,
+    settlement_layer_chain_id: u64,
 ) -> Result<B256> {
     let ic = IInteropCenter::new(INTEROP_CENTER, &source.provider);
     // bundleHash is independent of the atomic attribute (the atomic metadata deliberately never
-    // enters the bundle - see InteropCenter._parseAtomicSend), so predict without it: the real
-    // attribute cannot be built yet (its preimage contains this bundle's own hash), and a
-    // placeholder would fail `append`'s bundle-is-a-leg check.
-    ic.sendBundle(
-        encode_evm_chain(dest.chain_id),
-        vec![bridge_call_starter(source, amount, recipient)],
-        vec![],
-    )
-    .value(fee)
-    .gas(ATOMIC_SEND_GAS)
-    .call()
-    .await
-    .context("predict sendBundle callStatic")
+    // enters the bundle - see InteropCenter._parseAtomicSend), but the reduced contracts reject
+    // a non-atomic L2->L2 send outright (NonAtomicSendUnsupported), so an attribute-less
+    // callStatic no longer works. The real attribute cannot be built yet either (its preimage
+    // contains this bundle's own hash). Instead, callStatic with a syntactically valid DUMMY
+    // preimage whose legs cannot contain this bundle: AtomicFlowManager.append then reverts with
+    // `ManagerCommittedBundleNotInFlow(flowId, bundleHash)` — carrying the actual bundle hash,
+    // computed after the full (state-discarded) bundle assembly.
+    let dummy_preimage = AtomicFlowPreimage {
+        version: FixedBytes::from([0x01u8]),
+        deadline,
+        settlementLayerChainId: U256::from(settlement_layer_chain_id),
+        legBundleHashes: vec![B256::with_last_byte(1), B256::with_last_byte(2)],
+        legSourceChainIds: vec![U256::from(source.chain_id), U256::from(source.chain_id)],
+    };
+    let err = match ic
+        .sendBundle(
+            encode_evm_chain(dest.chain_id),
+            vec![bridge_call_starter(source, amount, recipient)],
+            vec![atomic_bundle_attr(dummy_preimage, U256::ZERO)],
+        )
+        .value(fee)
+        .gas(ATOMIC_SEND_GAS)
+        .call()
+        .await
+    {
+        Ok(_) => bail!("dummy-preimage sendBundle callStatic unexpectedly succeeded"),
+        Err(err) => err,
+    };
+    let decoded = err
+        .as_decoded_error::<ManagerCommittedBundleNotInFlow>()
+        .with_context(|| format!("expected ManagerCommittedBundleNotInFlow revert, got: {err}"))?;
+    Ok(decoded.bundleHash)
 }
 
 /// Atomic-send one leg (burn + IMT insert). Returns `(bundleData, bundleHash, txHash, sendBlock)`.
@@ -680,14 +707,15 @@ async fn atomic_swap_l1_settled(
     let deadline = l1_now + DEADLINE_BUFFER_SECS;
 
     // ── Predict bundle hashes -> flowId ──
-    let h_ab = predict_bundle_hash(&a, &b, a_amount, user, fee).await?;
-    let h_ba = predict_bundle_hash(&b, &a, b_amount, user, fee).await?;
+    let h_ab = predict_bundle_hash(&a, &b, a_amount, user, fee, deadline, l1_chain_id).await?;
+    let h_ba = predict_bundle_hash(&b, &a, b_amount, user, fee, deadline, l1_chain_id).await?;
     // legBundleHashes ascending; legSourceChainIds POSITIONAL (aligned 1:1 with the sorted hashes).
     let mut legs = [(h_ab, U256::from(a.chain_id)), (h_ba, U256::from(b.chain_id))];
     legs.sort_by(|x, y| x.0.cmp(&y.0));
     let leg_hashes_asc: Vec<B256> = legs.iter().map(|(h, _)| *h).collect();
     let leg_source_chain_ids: Vec<U256> = legs.iter().map(|(_, c)| *c).collect();
     let preimage = AtomicFlowPreimage {
+        version: FixedBytes::from([0x01u8]),
         deadline,
         settlementLayerChainId: U256::from(l1_chain_id),
         legBundleHashes: leg_hashes_asc.clone(),
