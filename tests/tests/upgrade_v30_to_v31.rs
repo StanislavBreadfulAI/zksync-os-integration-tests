@@ -18,11 +18,13 @@ use tests::upgrade_v30_to_v31::fixture::{
 };
 use tests::upgrade_v30_to_v31::protocol;
 
-// Ignored on the atomic-interop feature branch (kl/l1-settled-interop-proof): the v30->v31 upgrade
-// path is orthogonal to atomic interop and not what this branch validates. Re-enable (drop this
-// #[ignore]) before merging to main. The underlying upgrade regression — the atomic IMT seed reverting
-// the v31 upgrade tx — is fixed in era-contracts (atomic-imt-interop: seed only on fresh genesis).
-#[ignore = "v30->v31 upgrade is out of scope for the atomic-interop branch; re-enable before merge to main"]
+// Ignored against the reduced (release) contracts lineage: era-contracts #2360 gates the v31
+// upgrade of a ZKsync OS chain on the draft-v31 base-token backfill (`s.baseTokenHasTotalSupply`
+// + a `PriorityOpLowerBound` record), and this test's frozen v30 fixture never ran draft-v31.
+// Re-enabling needs the harness to model that prerequisite before `run_chain_upgrade` — see
+// `protocol::set_zkos_pre_v31_total_supply` for the recipe (mirrors era-contracts'
+// `modelDraftV31BackfillPrerequisite` anvil shim).
+#[ignore = "v30 fixture never ran the draft-v31 backfill the reduced-lineage v31 upgrade is gated on"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v30_to_v31_upgrade() -> Result<()> {
     // The upgrade runbook runs forge scripts — compiled contracts are required.

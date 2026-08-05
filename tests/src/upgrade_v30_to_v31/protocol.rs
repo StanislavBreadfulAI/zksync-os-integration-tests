@@ -229,32 +229,34 @@ pub async fn run_chain_upgrade(
     Ok(())
 }
 
-/// Post-chain-upgrade step for ZKsync OS chains: backfill the base token's
-/// pre-v31 total supply (mirrors SetZkosPreV31TotalSupply.s.sol). The v31 L2
-/// upgrade sets needBaseTokenTotalSupplyBackfill=true on upgraded ZKOS chains,
-/// and until ChainAdmin sends this service tx every base-token deposit makes
-/// L2BaseTokenZKOS.totalSupply() revert, which kills the server's block
-/// executor.
+/// Post-chain-upgrade step for ZKsync OS chains — a no-op turned hard error on
+/// the reduced (release) contracts lineage.
 ///
-/// Sent as ChainAdmin.multicall signed by the chain admin's owner — the same
-/// path SetZkosPreV31TotalSupply.s.sol uses (Utils.adminExecuteCalls).
+/// era-contracts #2360 removed `Admin.setZKsyncOSPreV31TotalSupply` and every
+/// backfill entry point: the pre-v31 total supply is backfilled on *draft-v31*
+/// (which sets `s.baseTokenHasTotalSupply`), and this release's v31 upgrade of a
+/// ZKsync OS chain is gated on that flag plus a `PriorityOpLowerBound` registry
+/// entry proving the backfill executed on L2. A v30 chain that never ran
+/// draft-v31 — like this test's frozen fixture — has no in-release path to
+/// satisfy the gate.
 ///
-/// TODO(protocol-ops): replace with a `chain set-zkos-pre-v31-total-supply`
-/// command wrapping `SetZkosPreV31TotalSupply.s.sol`.
+/// To re-enable the upgrade test against these contracts, model the draft-v31
+/// prerequisite on the forked L1 state before `run_chain_upgrade`, the way
+/// era-contracts' anvil harness does (`l1-contracts/test/anvil-interop/src/
+/// helpers/harness-shims.ts::modelDraftV31BackfillPrerequisite`): write the
+/// `baseTokenHasTotalSupply` bit into the diamond and record the chain's
+/// current priority-op count in the upgrade's `PriorityOpLowerBound` registry.
 pub async fn set_zkos_pre_v31_total_supply(
     _l1_rpc: &str,
     _bridgehub: Address,
     _chain_id: u64,
     _chain_admin_owner_key: &str,
 ) -> Result<()> {
-    // The pre-v31 supply used to be read from L1AssetTracker.chainBalance and sent to
-    // the diamond via ChainAdmin.multicall(setZKsyncOSPreV31TotalSupply) — see
-    // SetZkosPreV31TotalSupply.s.sol. The atomic-interop contracts removed the
-    // L1AssetTracker, so the supply has no on-chain source here; the v30->v31 upgrade
-    // test is #[ignore]d on this branch for the same reason.
     anyhow::bail!(
-        "v30->v31 upgrade flow is not supported on the atomic-interop branch: \
-         the L1AssetTracker (source of the pre-v31 total supply) no longer exists"
+        "v30->v31 upgrade of a never-backfilled ZKsync OS chain is not supported on the \
+         reduced contracts lineage: Admin.setZKsyncOSPreV31TotalSupply was removed and the \
+         upgrade is gated on the draft-v31 backfill (s.baseTokenHasTotalSupply + \
+         PriorityOpLowerBound)"
     );
 }
 
