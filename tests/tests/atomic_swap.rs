@@ -477,6 +477,7 @@ async fn predict_bundle_hash(
 }
 
 /// Atomic-send one leg (burn + IMT insert). Returns `(bundleData, bundleHash, txHash, sendBlock)`.
+#[allow(clippy::too_many_arguments)]
 async fn send_atomic_leg(
     source: &ChainCtx,
     dest: &ChainCtx,
@@ -687,7 +688,7 @@ async fn atomic_swap_l1_settled(
         (h_ab, U256::from(a.chain_id)),
         (h_ba, U256::from(b.chain_id)),
     ];
-    legs.sort_by(|x, y| x.0.cmp(&y.0));
+    legs.sort_by_key(|x| x.0);
     let leg_hashes_asc: Vec<B256> = legs.iter().map(|(h, _)| *h).collect();
     let leg_source_chain_ids: Vec<U256> = legs.iter().map(|(_, c)| *c).collect();
     let preimage = AtomicFlowPreimage {
