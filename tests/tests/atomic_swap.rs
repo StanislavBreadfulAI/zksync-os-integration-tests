@@ -683,7 +683,10 @@ async fn atomic_swap_l1_settled(
     let h_ab = predict_bundle_hash(&a, &b, a_amount, user, fee).await?;
     let h_ba = predict_bundle_hash(&b, &a, b_amount, user, fee).await?;
     // legBundleHashes ascending; legSourceChainIds POSITIONAL (aligned 1:1 with the sorted hashes).
-    let mut legs = [(h_ab, U256::from(a.chain_id)), (h_ba, U256::from(b.chain_id))];
+    let mut legs = [
+        (h_ab, U256::from(a.chain_id)),
+        (h_ba, U256::from(b.chain_id)),
+    ];
     legs.sort_by(|x, y| x.0.cmp(&y.0));
     let leg_hashes_asc: Vec<B256> = legs.iter().map(|(h, _)| *h).collect();
     let leg_source_chain_ids: Vec<U256> = legs.iter().map(|(_, c)| *c).collect();
