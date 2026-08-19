@@ -1,9 +1,11 @@
-/// End-to-end v30→v31 protocol upgrade on an L1-settling ZKsync OS chain.
+/// End-to-end v31→v32 protocol upgrade on an L1-settling ZKsync OS chain.
 ///
-/// Starts the v30.2 frozen fixture (anvil state + in-process server), drives
+/// Starts the v31.0 frozen fixture (anvil state + in-process server), drives
 /// the full upgrade through protocol-ops, and verifies the upgraded chain
 /// still processes deposits. The fixture is restored from a committed snapshot
 /// via [`fixture::start`]; the upgrade steps live in [`protocol`].
+use std::time::Duration;
+
 use alloy::primitives::{Address, U256};
 use anyhow::{Context, Result};
 use protocol_ops::commands::ecosystem::upgrade::{
@@ -13,47 +15,48 @@ use protocol_ops::common::forge::scripts::{
     CORE_UPGRADE_V31_SCRIPT_PATH, CTM_UPGRADE_V31_SCRIPT_PATH, UPGRADE_V31_CORE_OUTPUT_PATH,
 };
 
-use tests::upgrade_v30_to_v31::fixture::{
-    self, DEPLOYER_ADDR, DEPLOYER_KEY, GOVERNOR_KEY, V30_BYTECODES_SUPPLIER, V30_ROLLUP_DA_MANAGER,
+use tests::upgrade_v31_to_v32::fixture::{
+    self, CHAIN_ADMIN_OWNER_KEY, DEPLOYER_ADDR, DEPLOYER_KEY, GOVERNOR_KEY,
 };
-use tests::upgrade_v30_to_v31::protocol;
+use tests::upgrade_v31_to_v32::protocol;
 
-// Ignored on the atomic-interop feature branch (kl/l1-settled-interop-proof): the v30->v31 upgrade
-// path is orthogonal to atomic interop and not what this branch validates. Re-enable (drop this
-// #[ignore]) before merging to main. The underlying upgrade regression — the atomic IMT seed reverting
-// the v31 upgrade tx — is fixed in era-contracts (atomic-imt-interop: seed only on fresh genesis).
-#[ignore = "v30->v31 upgrade is out of scope for the atomic-interop branch; re-enable before merge to main"]
+/// The v32 upgrade waits on the chain executing its pre-upgrade priority ops;
+/// on a cold fixture that is a full commit/prove/execute round per batch.
+const PRIORITY_QUEUE_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[tokio::test(flavor = "multi_thread")]
-async fn test_v30_to_v31_upgrade() -> Result<()> {
+async fn test_v31_to_v32_upgrade() -> Result<()> {
     // The upgrade runbook runs forge scripts — compiled contracts are required.
     tests::fixtures::ensure_contracts_built().await;
 
-    let eco = fixture::start().await.context("start v30.2 fixture")?;
+    let eco = fixture::start().await.context("start v31.0 fixture")?;
     let chain = eco.chain();
     let l1_rpc = chain.l1_rpc_url();
     let bridgehub = chain.bridgehub_addr();
     let chain_id = chain.chain_id();
 
-    // ── ecosystem upgrade-prepare (deployer) ─────────────────────────────────
-    //
-    // The three pre-v31 override addresses are needed because the v30 CTM
-    // doesn't expose the getters protocol-ops would auto-resolve them from.
-    let prepare_dir = eco.workdir().join("upgrade_prepare");
-    let governance_toml = eco.workdir().join("ecosystem.toml");
     let ctm = protocol_ops::common::l1_contracts::resolve_ctm_proxy(l1_rpc, bridgehub, chain_id)
         .await
         .context("resolve CTM")?;
+
+    // ── ecosystem upgrade-prepare (deployer) ─────────────────────────────────
+    //
+    // The v31 CTM exposes the getters protocol-ops resolves the bytecodes
+    // supplier and rollup DA manager from, so unlike the v30 fixture no
+    // pre-v31 override addresses are needed.
+    let prepare_dir = eco.workdir().join("upgrade_prepare");
+    let governance_toml = eco.workdir().join("ecosystem.toml");
     run_upgrade_prepare_all(UpgradePrepareAllArgs {
         shared: protocol::shared_args(l1_rpc, &prepare_dir),
         topology: protocol::ecosystem_args(bridgehub),
         deployer_address: Some(DEPLOYER_ADDR.parse().unwrap()),
         ctm_proxies: vec![ctm],
         ctm_config: None,
-        bytecodes_supplier_address: Some(V30_BYTECODES_SUPPLIER.parse().unwrap()),
-        rollup_da_manager_address: Some(V30_ROLLUP_DA_MANAGER.parse().unwrap()),
+        bytecodes_supplier_address: None,
+        rollup_da_manager_address: None,
         is_zk_sync_os: Some(true),
         create2_factory_salt: None,
-        upgrade_input_path: fixture::V30_UPGRADE_INPUT_PATH.to_string(),
+        upgrade_input_path: fixture::V31_UPGRADE_INPUT_PATH.to_string(),
         core_output_path: UPGRADE_V31_CORE_OUTPUT_PATH.to_string(),
         core_script_path: CORE_UPGRADE_V31_SCRIPT_PATH.to_string(),
         ctm_script_path: CTM_UPGRADE_V31_SCRIPT_PATH.to_string(),
@@ -77,6 +80,23 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
         .await
         .context("apply upgrade-governance")?;
 
+    // ── v32 prerequisite: pin the priority-op bound, then let it drain ───────
+    //
+    // Recorded before the upgrade is scheduled so it lands in its own
+    // transaction, as V32UpgradeZKsyncOS requires.
+    protocol::record_priority_op_lower_bound(l1_rpc, bridgehub, chain_id, ctm, DEPLOYER_KEY)
+        .await
+        .context("record priority-op lower bound")?;
+    protocol::wait_for_priority_ops_processed(
+        l1_rpc,
+        bridgehub,
+        chain_id,
+        ctm,
+        PRIORITY_QUEUE_DRAIN_TIMEOUT,
+    )
+    .await
+    .context("wait for priority ops below the bound to be processed")?;
+
     // ── Schedule the upgrade; server produces the L2 upgrade block ───────────
     //
     // Capture the latest L2 block BEFORE scheduling: the server's upgrade-tx
@@ -87,14 +107,14 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
     protocol::schedule_upgrade_timestamp(
         l1_rpc,
         eco.workdir(),
-        &[GOVERNOR_KEY],
+        &[GOVERNOR_KEY, CHAIN_ADMIN_OWNER_KEY],
         bridgehub,
         chain_id,
     )
     .await
     .context("schedule upgrade timestamp")?;
 
-    // The upgrade_gatekeeper blocks the v31 batch until the L1 chain upgrade
+    // The upgrade_gatekeeper blocks the v32 batch until the L1 chain upgrade
     // below; meanwhile the server seals the L2 upgrade block.
     let upgrade_block = pre_upgrade_latest + 1;
     chain
@@ -102,31 +122,29 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
         .await
         .context("wait for upgrade block")?;
 
-    // Before bumping L1's protocolVersion, make sure every pre-upgrade (v30)
+    // Before bumping L1's protocolVersion, make sure every pre-upgrade (v31)
     // batch is finalized on L1 — otherwise the upgrade_gatekeeper sees
-    // contract(v31) > batch(v30) and hard-fails.
+    // contract(v32) > batch(v31) and hard-fails.
     chain
         .wait_for_block_finalized(pre_upgrade_latest)
         .await
         .context("wait for pre-upgrade batches to finalize")?;
 
-    // ── Stage3 token migration + L1 chain upgrade ────────────────────────────
-    protocol::run_stage3(l1_rpc, eco.workdir(), bridgehub, chain_id, DEPLOYER_KEY)
-        .await
-        .context("stage3 token migration")?;
-    protocol::run_chain_upgrade(l1_rpc, eco.workdir(), &[GOVERNOR_KEY], bridgehub, chain_id)
-        .await
-        .context("chain upgrade")?;
-    protocol::assert_protocol_version(l1_rpc, bridgehub, chain_id, 31)
+    // ── L1 chain upgrade ─────────────────────────────────────────────────────
+    protocol::run_chain_upgrade(
+        l1_rpc,
+        eco.workdir(),
+        &[GOVERNOR_KEY, CHAIN_ADMIN_OWNER_KEY],
+        bridgehub,
+        chain_id,
+    )
+    .await
+    .context("chain upgrade")?;
+    protocol::assert_protocol_version(l1_rpc, bridgehub, chain_id, 32)
         .await
         .context("protocol version assertion")?;
 
-    // ── ZKOS base-token supply backfill (post-upgrade requirement) ───────────
-    protocol::set_zkos_pre_v31_total_supply(l1_rpc, bridgehub, chain_id, GOVERNOR_KEY)
-        .await
-        .context("set ZKOS pre-v31 total supply")?;
-
-    // The L1 upgrade unblocks the gatekeeper; wait for the v31 upgrade batch
+    // The L1 upgrade unblocks the gatekeeper; wait for the v32 upgrade batch
     // to commit/prove/execute.
     chain
         .wait_for_block_finalized(upgrade_block)
@@ -151,9 +169,7 @@ async fn test_v30_to_v31_upgrade() -> Result<()> {
         .context("wait for post-upgrade deposit on L2")?;
 
     // Wait for the deposit's block to finalize. Snapshot latest_block after the
-    // balance appears — the deposit is in a block <= this number. This avoids the
-    // wait_for_batch() race where the batch may have already finalized before the
-    // snapshot is taken, leaving wait_for_batch() waiting for a block that never comes.
+    // balance appears — the deposit is in a block <= this number.
     let deposit_block = chain
         .latest_block()
         .await

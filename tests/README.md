@@ -36,6 +36,7 @@ Declare as `#[future] name: Type` parameters on your test function. Import from
 |---------|------|-------------|
 | `ecosystem` | `Ecosystem` | N L1-settling ZKsync OS chains on one Anvil L1 (default: one chain, ID 6565), 10 wallets pre-funded with 100 ETH each per chain |
 | `v30_chain::start()` | `Ecosystem` | Frozen v30.2 chain restored from a committed snapshot via `restore()`; used by the protocol-upgrade test. The chain has no test wallets (driven through governor/deployer L1 keys, which are pre-funded in the committed `l1-state`). |
+| `upgrade_v31_to_v32::fixture::start()` | `Ecosystem` | Frozen v31.0 chain (chain 506) restored the same way; used by the v31→v32 upgrade test. Driven through the L1 keys in its `wallets.yaml` — anvil account #0 owns the Governance contract, and chain 506's `owner` owns the ChainAdmin. |
 
 **Restoring a fixed chain:** `fixtures::restore::restore(dir)` brings up an
 `Ecosystem` from a committed snapshot directory (`l1-state.json.gz` +
@@ -241,9 +242,15 @@ async fn transfer_between_wallets(#[future] ecosystem: Ecosystem) {
 
 ### Example: protocol upgrade
 
-See `tests/tests/upgrade_v30_to_v31.rs` — starts the frozen v30.2 fixture
-(`fixtures::v30_chain`), drives the real upgrade runbook steps
-(`tests::protocol_upgrade`), and verifies post-upgrade deposits.
+See `tests/tests/upgrade_v31_to_v32.rs` — starts the frozen v31.0 fixture
+(`upgrade_v31_to_v32::fixture`), drives the real upgrade runbook steps
+(`tests::upgrade` plus the v32-only priority-op bound in
+`upgrade_v31_to_v32::protocol`), and verifies post-upgrade deposits.
+
+`tests/tests/upgrade_v30_to_v31.rs` is the same shape one version down
+(`upgrade_v30_to_v31::{fixture, protocol}`); it is `#[ignore]`d on this branch,
+where the atomic-interop contracts removed the L1AssetTracker its base-token
+supply backfill reads.
 
 ---
 
