@@ -29,17 +29,10 @@ jobs:
       - name: Run cargo audit
         # RUSTSEC-2025-0055: tracing-subscriber 0.2.x pulled in by ark-relations
         # (transitive dep of zksync-os); not fixable from this repo.
-        # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml 0.39 pulled in by inferno,
-        # a dep of risc_v_simulator in the historical zksync-os compat lanes; the fix
-        # (0.41) is a breaking bump upstream must take.
-        # RUSTSEC-2026-0235: rkyv 0.7 via rust_decimal's rkyv feature (transitive);
-        # the fix (0.8) is a breaking bump upstream must take.
-        run: >-
-          cargo audit
-          --ignore RUSTSEC-2025-0055
-          --ignore RUSTSEC-2026-0194
-          --ignore RUSTSEC-2026-0195
-          --ignore RUSTSEC-2026-0235
+        # 'RUSTSEC-2026-0235': out-of-bounds read in `rkyv` < 0.8.17 when validating untrusted archives.
+        # `rkyv` 0.7.46 is only in Cargo.lock as an unused optional dependency of `rust_decimal` (via
+        # `byte-unit` <- `openraft`); no feature combination in this workspace enables it, so it is never compiled.
+        run: cargo audit --ignore RUSTSEC-2025-0055 --ignore RUSTSEC-2026-0235
 
   cargo-deny:
     runs-on: ubuntu-latest
