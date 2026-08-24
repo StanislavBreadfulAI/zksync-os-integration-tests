@@ -22,7 +22,7 @@ use protocol_ops::common::{
     wallets::load_wallets,
     PrivateKey,
 };
-use protocol_ops::types::{DAValidatorType, L2ChainId, VMOption};
+use protocol_ops::types::{DAValidatorType, L2ChainId, PubdataContent, VMOption};
 
 #[derive(Parser, Debug)]
 pub struct ApplyArgs {
@@ -159,7 +159,12 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 chain_params,
                 vm_type,
                 l2_da_commitment_scheme: None,
+                pubdata_content: Some(resolve_pubdata_content(chain)),
                 with_legacy_bridge: false,
+                // Every chain in one intent is meant to interop with the others, and each chain is
+                // registered as it is created (pairs whose counterpart does not exist yet get picked
+                // up when that chain runs this step).
+                register_for_interop: true,
                 create2_factory_salt: None,
                 pause_deposits: false,
                 evm_emulator: false,
@@ -347,6 +352,26 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
 /// Protocol sentinel address used for an ETH base token.
 const ETH_BASE_TOKEN: Address = address!("0x0000000000000000000000000000000000000001");
 
+/// Which part of the pubdata the chain's batches commit to.
+///
+/// A rollup commits and publishes everything; a validium (`no_da`) commits only the mandatory
+/// L2->L1 log region, which still keeps its interop-commitment (IMT) leaves reconstructible from L1.
+/// A custom-DA chain (`avail`) hands the *full* pubdata to its DA layer and commits a hash over it,
+/// so it stays `FullPubdata`.
+///
+/// The value is part of the batch public input (through the ZKsync OS chain config hash), so it must
+/// match what the chain's server and prover run with. The server pinned here still builds its config as
+/// `ChainConfig::new(chain_id, false, DEFAULT_MAX_TX_GAS_LIMIT)` (`lib/native_pig/src/v32.rs`) and never
+/// calls `with_pubdata_content`, i.e. it always proves `FullPubdata` — so a `no_da` chain needs the
+/// matching server-side change before its batches can be proven. Rollup chains, which is all the
+/// integration tests deploy, are unaffected.
+fn resolve_pubdata_content(chain: &ChainIntent) -> PubdataContent {
+    match chain.da_mode {
+        DaMode::NoDa => PubdataContent::LogsOnly,
+        DaMode::Rollup | DaMode::Avail => PubdataContent::FullPubdata,
+    }
+}
+
 fn resolve_da(
     chain: &ChainIntent,
     vm_type: VMOption,
@@ -369,4 +394,33 @@ fn resolve_da(
         DaMode::NoDa => (DAValidatorType::NoDA, eco.no_da_l1_validator),
         DaMode::Avail => (DAValidatorType::Avail, eco.avail_l1_da_validator),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(da_mode: DaMode) -> ChainIntent {
+        ChainIntent {
+            chain_id: 6565,
+            base_token: None,
+            da_mode,
+        }
+    }
+
+    #[test]
+    fn pubdata_content_follows_the_da_mode() {
+        assert_eq!(
+            resolve_pubdata_content(&chain(DaMode::Rollup)),
+            PubdataContent::FullPubdata
+        );
+        assert_eq!(
+            resolve_pubdata_content(&chain(DaMode::Avail)),
+            PubdataContent::FullPubdata
+        );
+        assert_eq!(
+            resolve_pubdata_content(&chain(DaMode::NoDa)),
+            PubdataContent::LogsOnly
+        );
+    }
 }
