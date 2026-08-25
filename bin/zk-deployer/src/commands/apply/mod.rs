@@ -377,21 +377,36 @@ fn resolve_da(
     vm_type: VMOption,
     eco: &ResolvedEcosystem,
 ) -> anyhow::Result<(DAValidatorType, Address)> {
+    // A ZKsync OS chain — rollup or validium — publishes its pubdata through blobs and therefore runs
+    // the same L1 DA validator. A validium publishes *less* pubdata, not none: it drops the state
+    // diffs and message preimages (`PubdataContent::LogsOnly`, see `resolve_pubdata_content`) and
+    // keeps publishing the L2->L1 log region, which carries the interop commitment tree leaves.
+    let blobs_validator = || {
+        eco.blobs_zksync_os_l1_da_validator.ok_or_else(|| {
+            anyhow::anyhow!(
+                "blobs_zksync_os_l1_da_validator not found in state — \
+                 re-run bootstrap to populate it"
+            )
+        })
+    };
+
     Ok(match chain.da_mode {
         DaMode::Rollup => {
             let validator = if vm_type == VMOption::ZKSyncOsVM {
-                eco.blobs_zksync_os_l1_da_validator.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "blobs_zksync_os_l1_da_validator not found in state — \
-                         re-run bootstrap to populate it"
-                    )
-                })?
+                blobs_validator()?
             } else {
                 eco.rollup_l1_da_validator
             };
             (DAValidatorType::Rollup, validator)
         }
-        DaMode::NoDa => (DAValidatorType::NoDA, eco.no_da_l1_validator),
+        DaMode::NoDa => {
+            let validator = if vm_type == VMOption::ZKSyncOsVM {
+                blobs_validator()?
+            } else {
+                eco.no_da_l1_validator
+            };
+            (DAValidatorType::NoDA, validator)
+        }
         DaMode::Avail => (DAValidatorType::Avail, eco.avail_l1_da_validator),
     })
 }

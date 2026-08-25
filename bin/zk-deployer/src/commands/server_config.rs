@@ -4,7 +4,7 @@ use alloy::primitives::Address;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 
-use crate::intent::{ChainIntent, DaMode, IntentConfig};
+use crate::intent::{ChainIntent, IntentConfig};
 use crate::state::{
     ChainInitPreparedOutput, EcosystemInitOutput, State, StepKey, TokenDeployedOutput,
 };
@@ -203,11 +203,15 @@ pub(crate) fn resolve_base_token_addr(
     }
 }
 
-pub(crate) fn resolve_pubdata_mode(chain: &ChainIntent) -> &'static str {
-    match chain.da_mode {
-        DaMode::NoDa => "RelayedL2Calldata",
-        _ => "Blobs",
-    }
+/// The DA *mechanism* the server publishes each batch's pubdata with — the server's `PubdataMode`,
+/// whose only variants are `Blobs`, `Calldata` and `Validium`.
+///
+/// Every ZKsync OS chain deployed here publishes through blobs, including a validium: a validium
+/// differs in how *much* pubdata it produces (`PubdataContent::LogsOnly`, applied on L1 by `apply`),
+/// not in how that pubdata reaches L1. Blobs also pair with the rollup pubdata *pricing* such a chain
+/// is registered with, which the server cross-checks against L1 at startup.
+pub(crate) fn resolve_pubdata_mode(_chain: &ChainIntent) -> &'static str {
+    "Blobs"
 }
 
 fn pick_chain(intent: &IntentConfig, chain_id: Option<u64>) -> Result<&ChainIntent> {
