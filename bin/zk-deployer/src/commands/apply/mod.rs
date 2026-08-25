@@ -354,20 +354,18 @@ const ETH_BASE_TOKEN: Address = address!("0x000000000000000000000000000000000000
 
 /// Which part of the pubdata the chain's batches commit to.
 ///
-/// A rollup commits and publishes everything; a validium (`no_da`) commits only the mandatory
-/// L2->L1 log region, which still keeps its interop-commitment (IMT) leaves reconstructible from L1.
-/// A custom-DA chain (`avail`) hands the *full* pubdata to its DA layer and commits a hash over it,
-/// so it stays `FullPubdata`.
+/// A rollup commits and publishes everything; a `logs_only_validium` commits exactly the region its
+/// name says, which is what keeps its interop-commitment (IMT) leaves reconstructible from L1. A
+/// custom-DA chain (`avail`) hands the *full* pubdata to its DA layer and commits a hash over it, so
+/// it stays `FullPubdata`.
 ///
 /// The value is part of the batch public input (through the ZKsync OS chain config hash), so it must
-/// match what the chain's server and prover run with. The server pinned here still builds its config as
-/// `ChainConfig::new(chain_id, false, DEFAULT_MAX_TX_GAS_LIMIT)` (`lib/native_pig/src/v32.rs`) and never
-/// calls `with_pubdata_content`, i.e. it always proves `FullPubdata` — so a `no_da` chain needs the
-/// matching server-side change before its batches can be proven. Rollup chains, which is all the
-/// integration tests deploy, are unaffected.
+/// match what the chain's server and prover run with. The server reads it from L1 and pins it at
+/// startup (matter-labs/zksync-os-server#1546); a `logs_only_validium` chain needs a server carrying
+/// that change, since older ones prove `FullPubdata` unconditionally.
 fn resolve_pubdata_content(chain: &ChainIntent) -> PubdataContent {
     match chain.da_mode {
-        DaMode::NoDa => PubdataContent::LogsOnly,
+        DaMode::LogsOnlyValidium => PubdataContent::LogsOnly,
         DaMode::Rollup | DaMode::Avail => PubdataContent::FullPubdata,
     }
 }
@@ -377,10 +375,11 @@ fn resolve_da(
     vm_type: VMOption,
     eco: &ResolvedEcosystem,
 ) -> anyhow::Result<(DAValidatorType, Address)> {
-    // A ZKsync OS chain — rollup or validium — publishes its pubdata through blobs and therefore runs
-    // the same L1 DA validator. A validium publishes *less* pubdata, not none: it drops the state
-    // diffs and message preimages (`PubdataContent::LogsOnly`, see `resolve_pubdata_content`) and
-    // keeps publishing the L2->L1 log region, which carries the interop commitment tree leaves.
+    // A ZKsync OS chain — rollup or logs-only validium — publishes its pubdata through blobs and
+    // therefore runs the same L1 DA validator. A logs-only validium publishes *less* pubdata, not
+    // none: it drops the state diffs and message preimages (`PubdataContent::LogsOnly`, see
+    // `resolve_pubdata_content`) and keeps publishing the L2->L1 log region, which carries the
+    // interop commitment tree leaves.
     let blobs_validator = || {
         eco.blobs_zksync_os_l1_da_validator.ok_or_else(|| {
             anyhow::anyhow!(
@@ -399,13 +398,13 @@ fn resolve_da(
             };
             (DAValidatorType::Rollup, validator)
         }
-        DaMode::NoDa => {
+        DaMode::LogsOnlyValidium => {
             let validator = if vm_type == VMOption::ZKSyncOsVM {
                 blobs_validator()?
             } else {
                 eco.no_da_l1_validator
             };
-            (DAValidatorType::NoDA, validator)
+            (DAValidatorType::LogsOnlyValidium, validator)
         }
         DaMode::Avail => (DAValidatorType::Avail, eco.avail_l1_da_validator),
     })
@@ -434,7 +433,7 @@ mod tests {
             PubdataContent::FullPubdata
         );
         assert_eq!(
-            resolve_pubdata_content(&chain(DaMode::NoDa)),
+            resolve_pubdata_content(&chain(DaMode::LogsOnlyValidium)),
             PubdataContent::LogsOnly
         );
     }

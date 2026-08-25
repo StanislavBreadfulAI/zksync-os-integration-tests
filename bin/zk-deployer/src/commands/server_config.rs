@@ -206,10 +206,10 @@ pub(crate) fn resolve_base_token_addr(
 /// The DA *mechanism* the server publishes each batch's pubdata with — the server's `PubdataMode`,
 /// whose only variants are `Blobs`, `Calldata` and `Validium`.
 ///
-/// Every ZKsync OS chain deployed here publishes through blobs, including a validium: a validium
-/// differs in how *much* pubdata it produces (`PubdataContent::LogsOnly`, applied on L1 by `apply`),
-/// not in how that pubdata reaches L1. Blobs also pair with the rollup pubdata *pricing* such a chain
-/// is registered with, which the server cross-checks against L1 at startup.
+/// Every ZKsync OS chain deployed here publishes through blobs, including a logs-only validium: such
+/// a chain differs in how *much* pubdata it produces (`PubdataContent::LogsOnly`, applied on L1 by
+/// `apply`), not in how that pubdata reaches L1. The server cross-checks this against the chain's DA
+/// commitment scheme on L1 at startup, which for all of them is `BLOBS_ZKSYNC_OS`.
 pub(crate) fn resolve_pubdata_mode(_chain: &ChainIntent) -> &'static str {
     "Blobs"
 }
