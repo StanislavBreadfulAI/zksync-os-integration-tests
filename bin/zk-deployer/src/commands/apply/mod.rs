@@ -360,9 +360,9 @@ const ETH_BASE_TOKEN: Address = address!("0x000000000000000000000000000000000000
 /// it stays `FullPubdata`.
 ///
 /// The value is part of the batch public input (through the ZKsync OS chain config hash), so it must
-/// match what the chain's server and prover run with. The server reads it from L1 and pins it at
-/// startup (matter-labs/zksync-os-server#1546); a `logs_only_validium` chain needs a server carrying
-/// that change, since older ones prove `FullPubdata` unconditionally.
+/// match what the chain's server and prover run with. The server derives it from L1 state
+/// (matter-labs/zksync-os-server#1530); a `logs_only_validium` chain needs a server carrying that
+/// change, since older ones prove `FullPubdata` unconditionally.
 fn resolve_pubdata_content(chain: &ChainIntent) -> PubdataContent {
     match chain.da_mode {
         DaMode::LogsOnlyValidium => PubdataContent::LogsOnly,
