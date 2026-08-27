@@ -83,7 +83,7 @@ pub async fn restore(dir: &Path) -> Result<Ecosystem> {
         dir.display()
     );
 
-    Ecosystem::assemble(anvil, workdir, specs).await
+    Ecosystem::assemble(anvil, workdir, specs, None).await
 }
 
 /// Committed server config files in `dir`: `server.yaml` or `server-<id>.yaml`,

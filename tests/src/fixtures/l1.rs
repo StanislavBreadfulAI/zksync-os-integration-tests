@@ -22,6 +22,14 @@ use super::cache;
 /// cached on disk under `.zkos-test-cache/` — see [`cache`] for the key
 /// inputs and the `ZKOS_CACHE` knob. Servers always start fresh.
 pub(super) async fn setup_l1_chains(chain_ids: &[u64]) -> Ecosystem {
+    setup_l1_chains_with_da(chain_ids, DaMode::Rollup).await
+}
+
+/// [`setup_l1_chains`] with the chains' DA mode chosen by the caller. The mode
+/// is part of the deployment cache key (it changes both the deployed DA
+/// validator pair and the rendered server config), so each mode caches
+/// separately.
+pub(super) async fn setup_l1_chains_with_da(chain_ids: &[u64], da_mode: DaMode) -> Ecosystem {
     assert!(!chain_ids.is_empty(), "need at least one chain");
     super::init_logging();
 
@@ -43,7 +51,7 @@ pub(super) async fn setup_l1_chains(chain_ids: &[u64]) -> Ecosystem {
             .map(|&chain_id| ChainIntent {
                 chain_id,
                 base_token: None,
-                da_mode: DaMode::Rollup,
+                da_mode: da_mode.clone(),
             })
             .collect(),
     };
@@ -164,7 +172,7 @@ pub(super) async fn setup_l1_chains(chain_ids: &[u64]) -> Ecosystem {
         });
     }
 
-    let eco = Ecosystem::assemble(anvil, workdir, specs)
+    let eco = Ecosystem::assemble(anvil, workdir, specs, Some(deployed))
         .await
         .expect("assemble ecosystem");
 
@@ -208,4 +216,14 @@ pub(super) async fn setup_l1_chains(chain_ids: &[u64]) -> Ecosystem {
 #[fixture]
 pub async fn ecosystem(#[default(vec![super::TEST_CHAIN_ID])] chains: Vec<u64>) -> Ecosystem {
     setup_l1_chains(&chains).await
+}
+
+/// Same as [`ecosystem`], but the chains are deployed as old-style validiums:
+/// the no-DA L1 validator with the `EmptyNoDA` commitment scheme, and servers
+/// running in `Validium` pubdata mode. Used by the DA-switch test.
+#[fixture]
+pub async fn validium_ecosystem(
+    #[default(vec![super::TEST_CHAIN_ID])] chains: Vec<u64>,
+) -> Ecosystem {
+    setup_l1_chains_with_da(&chains, DaMode::NoDa).await
 }

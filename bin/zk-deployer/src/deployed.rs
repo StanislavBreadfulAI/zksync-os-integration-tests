@@ -41,6 +41,23 @@ pub struct DeployedEcosystem {
 }
 
 impl DeployedEcosystem {
+    /// L1 DA validator deployed for no-DA (validium) chains.
+    pub fn no_da_l1_validator(&self) -> Address {
+        self.eco.no_da_l1_validator
+    }
+
+    /// L1 DA validator that checks calldata-published pubdata (the
+    /// `BlobsAndPubdataKeccak256` commitment scheme).
+    pub fn rollup_l1_da_validator(&self) -> Address {
+        self.eco.rollup_l1_da_validator
+    }
+
+    /// L1 DA validator for ZKsync OS blob DA; `None` on ecosystems bootstrapped
+    /// before it was deployed.
+    pub fn blobs_zksync_os_l1_da_validator(&self) -> Option<Address> {
+        self.eco.blobs_zksync_os_l1_da_validator
+    }
+
     /// Load from a workdir containing `intent.yaml`, `state.json` and
     /// `wallets.yaml` (the layout `bootstrap` + `apply` produce).
     pub fn load(workdir: &Path) -> Result<Self> {

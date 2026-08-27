@@ -203,9 +203,12 @@ pub(crate) fn resolve_base_token_addr(
     }
 }
 
+/// The server-side pubdata mode for a chain's DA mode. The names are the
+/// server's `PubdataMode` variants — `Validium` is the no-DA (`EmptyNoDA`
+/// commitment scheme) mode that `da_mode: no_da` deploys the chain with.
 pub(crate) fn resolve_pubdata_mode(chain: &ChainIntent) -> &'static str {
     match chain.da_mode {
-        DaMode::NoDa => "RelayedL2Calldata",
+        DaMode::NoDa => "Validium",
         _ => "Blobs",
     }
 }

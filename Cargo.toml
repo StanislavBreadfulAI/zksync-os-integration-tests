@@ -25,8 +25,14 @@ futures = "0.3"
 hex = "0.4"
 human-panic = "2.0"
 # TODO: re-point at the release branch once the atomic-interop DA work merges.
-protocol_ops = { git = "https://github.com/matter-labs/era-contracts", rev = "96d7c53b1fc1fc18af889b0d2cb14fd4ab242f34" }
-zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", rev = "96d7c53b1fc1fc18af889b0d2cb14fd4ab242f34" }
+# `release/v0.33.0-atomic-interop`, pinned one commit below its tip: the tip
+# (`e5f6e004`) bumps the genesis to v0.33.0 and zksync-os to v0.5.3-private, and
+# the server lane this repo runs (`ad-atomic-interop`) supports protocol versions
+# 30..=32 only — a v33 chain fails to start with "Protocol version does not
+# correspond to a known proving version". Move to the branch head once the server
+# gains v33 support.
+protocol_ops = { git = "https://github.com/matter-labs/era-contracts", rev = "d2ba106b09389490068afc814b5656fb22af03b5" }
+zksync_os_genesis_gen = { package = "zksync-os-genesis-gen", git = "https://github.com/matter-labs/era-contracts", rev = "d2ba106b09389490068afc814b5656fb22af03b5" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v2.5.0" }
 rstest = "0.26.1"
 serde = "1.0"

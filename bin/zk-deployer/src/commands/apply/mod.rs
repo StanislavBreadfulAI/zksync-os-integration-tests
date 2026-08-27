@@ -159,7 +159,9 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 chain_params,
                 vm_type,
                 l2_da_commitment_scheme: None,
-                with_legacy_bridge: false,
+                // Tests that need interop register the pairs themselves (see
+                // `atomic_swap`), so chain init stays a plain registration.
+                register_for_interop: false,
                 create2_factory_salt: None,
                 pause_deposits: false,
                 evm_emulator: false,

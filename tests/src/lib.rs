@@ -18,6 +18,7 @@
 //! See `tests/README.md` for the full API reference.
 
 pub mod chain;
+pub mod da;
 pub mod ecosystem;
 pub mod eth;
 pub mod fixtures;
