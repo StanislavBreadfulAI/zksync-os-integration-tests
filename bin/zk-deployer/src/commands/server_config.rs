@@ -208,8 +208,11 @@ pub(crate) fn resolve_base_token_addr(
 ///
 /// Every ZKsync OS chain deployed here publishes through blobs, including a logs-only validium: such
 /// a chain differs in how *much* pubdata it produces (`PubdataContent::LogsOnly`, applied on L1 by
-/// `apply`), not in how that pubdata reaches L1. The server cross-checks this against the chain's DA
-/// commitment scheme on L1 at startup, which for all of them is `BLOBS_ZKSYNC_OS`.
+/// `apply`), not in how that pubdata reaches L1 — which for all of them is `BLOBS_ZKSYNC_OS`.
+///
+/// The value is written out only because the pinned server still requires it. A server carrying
+/// matter-labs/zksync-os-server#1547 derives the mode from that same L1 scheme, and this whole
+/// function can go once the pin catches up.
 pub(crate) fn resolve_pubdata_mode(_chain: &ChainIntent) -> &'static str {
     "Blobs"
 }
