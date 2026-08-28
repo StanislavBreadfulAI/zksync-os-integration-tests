@@ -14,7 +14,6 @@ pub enum DaMode {
     /// leaves, which is what keeps the chain interop-capable — and drops the state diffs and the
     /// message preimages. That region still goes into blobs, so such a chain runs the same L1 DA
     /// validator a rollup does and differs from it only in its `PubdataContent`.
-    #[serde(alias = "no_da")]
     LogsOnlyValidium,
     /// Hands the full pubdata to Avail.
     Avail,
