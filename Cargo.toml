@@ -51,8 +51,8 @@ zksync_os_server = { git = "https://github.com/matter-labs/zksync-os-server-priv
 # protocol_ops          = { path = "../era-contracts/protocol-ops" }
 # zksync-os-genesis-gen = { path = "../era-contracts/tools/zksync-os-genesis-gen" }
 #
-# [patch."https://github.com/matter-labs/zksync-os-server"]
-# zksync_os_server           = { path = "../zksync-os-server" }
+# [patch."https://github.com/matter-labs/zksync-os-server-private"]
+# zksync_os_server = { path = "../zksync-os-server/node/bin" }
 
 [profile.release]
 # This is needed for zksync-airbender crates to compile in a reasonable time for x86-64-unknown-linux-gnu
