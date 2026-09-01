@@ -176,7 +176,6 @@ pub async fn run(args: BootstrapArgs) -> Result<()> {
             era_chain_id: intent.main_chain_id()?,
             vm_type: VMOption::ZKSyncOsVM,
             with_testnet_verifier: true,
-            with_legacy_bridge: false,
             zk_token_asset_id: None,
             create2_factory_salt: None,
         };
@@ -225,13 +224,14 @@ pub async fn run(args: BootstrapArgs) -> Result<()> {
     } else if args.broadcast && args.out.join("manifest.json").exists() {
         logger::step("Broadcasting ecosystem Safe bundles to L1...");
         let manifest_path = args.out.join("manifest.json");
-        let fund = preflight::is_local_rpc(&l1_rpc_url);
+        let deployer_key = args.private_key.expose().to_string();
+        let funder = preflight::is_local_rpc(&l1_rpc_url).then_some(deployer_key.as_str());
         apply_manifest(
             &manifest_path,
-            &[args.private_key.expose().to_string()],
+            std::slice::from_ref(&deployer_key),
             None,
             &l1_rpc_url,
-            fund,
+            funder,
         )
         .await?;
         state.mark_done(StepKey::EcosystemBundlesApply, &serde_json::json!({}))?;

@@ -159,7 +159,7 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 chain_params,
                 vm_type,
                 l2_da_commitment_scheme: None,
-                with_legacy_bridge: false,
+                register_for_interop: false,
                 create2_factory_salt: None,
                 pause_deposits: false,
                 evm_emulator: false,
@@ -208,9 +208,9 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
             if preflight::is_local_rpc(&l1_rpc_url) {
                 logger::step("Funding operator addresses on L1...");
                 for addr in [commit_operator, prove_operator, execute_operator] {
-                    protocol_ops::common::anvil::set_balance(&l1_rpc_url, addr)
+                    crate::funding::fund(&l1_rpc_url, &deployer_key, addr)
                         .await
-                        .with_context(|| format!("anvil_setBalance({addr:#x})"))?;
+                        .with_context(|| format!("funding operator {addr:#x}"))?;
                     logger::info(format!("  funded {addr:#x}"));
                 }
             }
@@ -235,7 +235,7 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 .with_context(|| format!("{} not found in state", prepared_key))?;
 
             logger::step(format!("Applying chain bundles for {}...", chain.chain_id));
-            let fund = preflight::is_local_rpc(&l1_rpc_url);
+            let funder = preflight::is_local_rpc(&l1_rpc_url).then_some(deployer_key.as_str());
             apply_manifest_from(
                 &manifest_path,
                 prepared.manifest_start,
@@ -243,7 +243,7 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 std::slice::from_ref(&deployer_key),
                 Some(&args.wallets),
                 &l1_rpc_url,
-                fund,
+                funder,
             )
             .await
             .with_context(|| {
@@ -272,11 +272,13 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
                 "Funding default dev wallets on L2 for chain {} (priority deposits)...",
                 chain.chain_id
             ));
+            let base_token = resolve_base_token_addr(chain, &state)?;
             crate::l1_l2_deposit::fund_default_l2_wallets(
                 &l1_rpc_url,
                 bridgehub,
                 chain.chain_id,
                 &deployer_key,
+                base_token,
             )
             .await?;
 
@@ -299,9 +301,9 @@ pub async fn run(args: ApplyArgs) -> Result<()> {
             let execute_operator = chain_wallets.operator_execute_sk.address;
 
             for addr in [commit_operator, prove_operator, execute_operator] {
-                protocol_ops::common::anvil::set_balance(&l1_rpc_url, addr)
+                crate::funding::fund(&l1_rpc_url, &deployer_key, addr)
                     .await
-                    .with_context(|| format!("anvil_setBalance({addr:#x})"))?;
+                    .with_context(|| format!("funding operator {addr:#x}"))?;
                 logger::info(format!("  funded {addr:#x} (chain {})", chain.chain_id));
             }
         }
