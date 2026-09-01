@@ -4,7 +4,7 @@ use alloy::primitives::Address;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 
-use crate::intent::{ChainIntent, DaMode, IntentConfig};
+use crate::intent::{ChainIntent, DaMode, IntentConfig, ValidiumDa};
 use crate::state::{
     ChainInitPreparedOutput, EcosystemInitOutput, State, StepKey, TokenDeployedOutput,
 };
@@ -205,8 +205,11 @@ pub(crate) fn resolve_base_token_addr(
 
 pub(crate) fn resolve_pubdata_mode(chain: &ChainIntent) -> &'static str {
     match chain.da_mode {
-        DaMode::NoDa => "RelayedL2Calldata",
-        _ => "Blobs",
+        DaMode::Rollup | DaMode::Avail | DaMode::Validium(ValidiumDa::Blobs) => "Blobs",
+        DaMode::Validium(ValidiumDa::Calldata) => "Calldata",
+        // `Validium` is the server's post-nothing mode and the only one its
+        // startup check accepts for a chain whose pricing mode is Validium.
+        DaMode::Validium(ValidiumDa::NoDa) => "Validium",
     }
 }
 
